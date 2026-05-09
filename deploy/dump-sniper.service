@@ -1,0 +1,48 @@
+[Unit]
+Description=Dump Sniper V2 - Solana memecoin dump-rebound bot
+Documentation=file:///opt/dump-sniper/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# 修改为实际部署路径（install.sh 会自动 sed 替换）
+WorkingDirectory=/opt/dump-sniper
+EnvironmentFile=/opt/dump-sniper/.env
+
+# 用绝对路径，systemd 启动时不会有 PATH
+ExecStart=/usr/bin/node /opt/dump-sniper/src/index.js
+
+# 重启策略
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+# 优雅退出超时（给 SQLite WAL flush 留时间）
+TimeoutStopSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+
+# 日志（journalctl -u dump-sniper -f 查看）
+StandardOutput=append:/opt/dump-sniper/logs/out.log
+StandardError=append:/opt/dump-sniper/logs/err.log
+SyslogIdentifier=dump-sniper
+
+# 资源限制
+LimitNOFILE=65536
+
+# 安全加固（按需开启，可能影响 better-sqlite3 等原生模块）
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+# ProtectHome=true   # 如果 WorkingDirectory 在 /home 下不要开
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

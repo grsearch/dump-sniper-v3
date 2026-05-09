@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Dump Sniper Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel-2: #1a1f2e;
+    --border: #2a2f3e;
+    --text: #d1d4dc;
+    --text-dim: #787b86;
+    --green: #26a69a;
+    --red: #ef5350;
+    --yellow: #f5b041;
+    --blue: #2962ff;
+    --accent: #4fc3f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .header h1 .v { color: var(--text-dim); font-weight: 400; margin-left: 8px; font-size: 12px; }
+  .badges { display: flex; gap: 10px; align-items: center; }
+  .badge {
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .badge.dry { background: rgba(245, 176, 65, 0.15); color: var(--yellow); border-color: var(--yellow); }
+  .badge.live { background: rgba(38, 166, 154, 0.15); color: var(--green); border-color: var(--green); }
+  .badge.ws { font-size: 10px; }
+  .badge.ws.connected { color: var(--green); }
+  .badge.ws.disconnected { color: var(--red); }
+
+  .container {
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .panel-head {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--panel-2);
+  }
+  .panel-head h2 { font-size: 13px; font-weight: 600; }
+  .panel-head .meta { color: var(--text-dim); font-size: 11px; }
+  .panel-body { padding: 12px 14px; }
+
+  /* Status grid */
+  .status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+  }
+  .status-item {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+  }
+  .status-item .label { color: var(--text-dim); font-size: 11px; margin-bottom: 2px; }
+  .status-item .value { font-size: 14px; font-weight: 600; font-family: "SF Mono", Consolas, monospace; }
+
+  /* Forms */
+  .add-form { display: flex; gap: 8px; align-items: center; }
+  .add-form input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: "SF Mono", Consolas, monospace;
+  }
+  .add-form input:focus { outline: none; border-color: var(--accent); }
+  .btn {
+    padding: 6px 14px;
+    border-radius: 4px;
+    border: none;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--blue);
+    color: white;
+  }
+  .btn:hover { opacity: 0.9; }
+  .btn-sm { padding: 3px 8px; font-size: 11px; }
+  .btn-danger { background: var(--red); }
+  .btn-secondary { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td {
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th { color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; background: var(--panel-2); position: sticky; top: 0; }
+  td.mono { font-family: "SF Mono", Consolas, monospace; }
+  tr:hover { background: rgba(255,255,255,0.02); }
+  .table-wrap { max-height: 360px; overflow-y: auto; }
+  .ca-link { color: var(--accent); text-decoration: none; font-family: "SF Mono", Consolas, monospace; }
+  .ca-link:hover { text-decoration: underline; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .neutral { color: var(--text-dim); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
+  .tab {
+    padding: 8px 16px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-dim);
+    border-bottom: 2px solid transparent;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:hover { color: var(--text); }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* Pills */
+  .pill {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .pill.buy { background: rgba(38, 166, 154, 0.2); color: var(--green); }
+  .pill.sell { background: rgba(239, 83, 80, 0.2); color: var(--red); }
+  .pill.dry { background: rgba(245, 176, 65, 0.2); color: var(--yellow); }
+  .pill.live { background: rgba(38, 166, 154, 0.2); color: var(--green); }
+  .pill.success { background: rgba(38, 166, 154, 0.2); color: var(--green); }
+  .pill.fail { background: rgba(239, 83, 80, 0.2); color: var(--red); }
+
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-size: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    transition: opacity 0.3s;
+    z-index: 1000;
+  }
+  .toast.error { border-color: var(--red); }
+  .toast.ok { border-color: var(--green); }
+
+  .empty { text-align: center; color: var(--text-dim); padding: 30px; font-size: 12px; }
+
+  /* Health */
+  .alert-banner {
+    padding: 10px 12px;
+    border-radius: 4px;
+    margin-bottom: 6px;
+    font-size: 12px;
+    border-left: 3px solid;
+  }
+  .alert-banner.critical { background: rgba(239,83,80,0.15); border-color: var(--red); color: #ffb3b0; }
+  .alert-banner.error    { background: rgba(239,83,80,0.10); border-color: var(--red); color: #ffb3b0; }
+  .alert-banner.warn     { background: rgba(245,176,65,0.10); border-color: var(--yellow); color: #ffd699; }
+  .alert-banner .name { font-weight: 600; margin-right: 6px; }
+  .alert-banner .ctx { color: var(--text-dim); font-size: 11px; margin-top: 4px; font-family: "SF Mono", Consolas, monospace; }
+
+  .heartbeat-card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    border-radius: 4px;
+    padding: 8px 10px;
+  }
+  .heartbeat-card.stale { border-left-color: var(--red); }
+  .heartbeat-card.never { border-left-color: var(--yellow); }
+  .heartbeat-card .label { font-weight: 600; font-size: 12px; }
+  .heartbeat-card .meta { color: var(--text-dim); font-size: 10px; font-family: "SF Mono", Consolas, monospace; }
+
+  .counter-row { display: flex; justify-content: space-between; padding: 3px 8px; font-size: 11px; font-family: "SF Mono", Consolas, monospace; }
+  .counter-row:nth-child(even) { background: var(--panel-2); }
+  .counter-row .key { color: var(--text-dim); }
+  .counter-row .val { font-weight: 600; }
+  .counter-row .val.err { color: var(--red); }
+
+  .error-block { background: var(--panel-2); border-left: 2px solid var(--red); padding: 6px 10px; margin-bottom: 4px; font-size: 11px; }
+  .error-block .msg { color: #ffb3b0; }
+  .error-block .ctx { color: var(--text-dim); font-family: "SF Mono", Consolas, monospace; font-size: 10px; margin-top: 2px; word-break: break-all; }
+  .error-block .ago { color: var(--text-dim); font-size: 10px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🎯 Dump Sniper <span class="v">v3.0</span></h1>
+  <div class="badges">
+    <span id="modeBadge" class="badge dry">DRY_RUN</span>
+    <span id="wsBadge" class="badge ws disconnected">● WS</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Status -->
+  <div class="panel">
+    <div class="panel-head"><h2>📊 状态</h2><span class="meta" id="statusMeta">-</span></div>
+    <div class="panel-body">
+      <div class="status-grid">
+        <div class="status-item"><div class="label">监控代币</div><div class="value" id="stat-watched">-</div></div>
+        <div class="status-item"><div class="label">当前持仓</div><div class="value" id="stat-open">-</div></div>
+        <div class="status-item"><div class="label">触发卖单SOL</div><div class="value" id="stat-minSell">-</div></div>
+        <div class="status-item"><div class="label">触发跌幅</div><div class="value" id="stat-impact">-</div></div>
+        <div class="status-item"><div class="label">每笔仓位</div><div class="value" id="stat-size">-</div></div>
+        <div class="status-item"><div class="label">止盈</div><div class="value" id="stat-tp">-</div></div>
+        <div class="status-item"><div class="label">最大持仓</div><div class="value" id="stat-hold">-</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Token list -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>📋 监控列表</h2>
+      <span class="meta" id="tokenCountMeta">0 tokens</span>
+    </div>
+    <div class="panel-body">
+      <div class="add-form" style="margin-bottom: 12px;">
+        <input id="addCa" type="text" placeholder="粘贴代币 CA (mint address)" />
+        <input id="addSymbol" type="text" placeholder="symbol (可选，自动识别)" style="max-width: 180px;" />
+        <button class="btn" onclick="addToken()">添加</button>
+      </div>
+      <div class="table-wrap">
+        <table id="tokenTable">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>CA</th><th>FDV</th><th>LP</th><th>Price</th><th>24h Vol</th><th>添加时间</th><th>来源</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="tokenTbody"><tr><td colspan="9" class="empty">尚未添加任何代币</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="panel">
+    <div class="panel-head"><h2>📜 实时日志</h2></div>
+    <div class="tabs">
+      <div class="tab active" data-tab="positions">持仓 / 平仓</div>
+      <div class="tab" data-tab="signals">信号</div>
+      <div class="tab" data-tab="trades">交易</div>
+    </div>
+    <div class="panel-body">
+      <!-- Positions -->
+      <div class="tab-pane active" id="pane-positions">
+        <h3 style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">当前开仓</h3>
+        <div class="table-wrap" style="max-height:200px;">
+          <table>
+            <thead><tr><th>开仓时间</th><th>Symbol</th><th>入场价</th><th>当前价</th><th>持有时间</th><th>未实现PnL%</th><th>模式</th></tr></thead>
+            <tbody id="openTbody"><tr><td colspan="7" class="empty">无</td></tr></tbody>
+          </table>
+        </div>
+        <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">最近平仓</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>Symbol</th><th>入场SOL</th><th>出场SOL</th><th>PnL SOL</th><th>PnL %</th><th>退出</th><th>模式</th></tr></thead>
+            <tbody id="closedTbody"><tr><td colspan="8" class="empty">尚无平仓记录</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- Signals -->
+      <div class="tab-pane" id="pane-signals">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>Symbol</th><th>类型</th><th>卖出SOL</th><th>跌幅%</th><th>状态</th><th>原因/备注</th></tr></thead>
+            <tbody id="signalsTbody"><tr><td colspan="7" class="empty">尚无信号</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- Trades -->
+      <div class="tab-pane" id="pane-trades">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>时间</th><th>Symbol</th><th>方向</th><th>SOL</th><th>数量</th><th>价格</th><th>结果</th><th>模式</th><th>延迟</th><th>签名</th></tr></thead>
+            <tbody id="tradesTbody"><tr><td colspan="10" class="empty">尚无交易</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Health Monitor -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>🩺 健康监控</h2>
+      <span class="meta" id="healthStatus">-</span>
+    </div>
+    <div class="panel-body">
+      <div id="alertsBox" style="display:none; margin-bottom:12px;"></div>
+      <h3 style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">心跳</h3>
+      <div id="heartbeatsBox" class="status-grid"></div>
+      <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">模块计数器</h3>
+      <div id="countersBox"></div>
+      <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">最近错误</h3>
+      <div id="errorsBox"></div>
+    </div>
+  </div>
+
+  <!-- Reports -->
+  <div class="panel">
+    <div class="panel-head"><h2>📅 每日报告</h2></div>
+    <div class="panel-body">
+      <p style="color:var(--text-dim);font-size:12px;margin-bottom:8px;">
+        北京时间每天早上 08:00 自动生成昨日完整报告，输出到 <code>./reports/</code> 目录。
+      </p>
+      <button class="btn btn-secondary" onclick="generateReport()">立即生成昨日报告</button>
+      <span id="reportResult" style="margin-left:12px;color:var(--text-dim);font-size:12px;"></span>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast" class="toast" style="display:none;"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null;
+
+// 从 URL 的 ?token= 读取，dashboard token 透传
+const _DASHBOARD_TOKEN = (() => {
+  try {
+    const t = new URLSearchParams(location.search).get('token');
+    return t || '';
+  } catch (_) { return ''; }
+})();
+
+// ============ WebSocket ============
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const tokenParam = _DASHBOARD_TOKEN ? `?token=${encodeURIComponent(_DASHBOARD_TOKEN)}` : '';
+  ws = new WebSocket(`${proto}//${location.host}/ws${tokenParam}`);
+  ws.onopen = () => { $('wsBadge').textContent = '● WS'; $('wsBadge').className = 'badge ws connected'; };
+  ws.onclose = () => {
+    $('wsBadge').textContent = '○ WS'; $('wsBadge').className = 'badge ws disconnected';
+    setTimeout(connectWs, 2000);
+  };
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleWs(msg);
+    } catch (_) {}
+  };
+}
+function handleWs(msg) {
+  if (msg.type === 'tokenAdded' || msg.type === 'tokenRemoved') {
+    refreshTokens();
+  } else if (msg.type === 'signal' || msg.type === 'trade' || msg.type === 'positionOpened' || msg.type === 'positionClosed') {
+    refreshAll();
+  } else if (msg.type === 'alert') {
+    showToast(`🔔 ${msg.alert.severity.toUpperCase()}: ${msg.alert.message}`, 'error');
+    refreshHealth();
+  } else if (msg.type === 'alertCleared') {
+    showToast(`✓ 告警解除: ${msg.alert.name}`, 'ok');
+    refreshHealth();
+  }
+}
+
+// ============ API ============
+async function api(path, opts = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (_DASHBOARD_TOKEN) headers['X-Dashboard-Token'] = _DASHBOARD_TOKEN;
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401) {
+    showToast('未授权：请检查 URL 中的 ?token=xxx 是否正确', 'error');
+  }
+  return r.json();
+}
+
+async function refreshStatus() {
+  const r = await api('/api/status');
+  if (!r.ok) return;
+  $('modeBadge').textContent = r.dryRun ? 'DRY_RUN' : 'LIVE';
+  $('modeBadge').className = 'badge ' + (r.dryRun ? 'dry' : 'live');
+  $('stat-watched').textContent = r.watchedTokens;
+  $('stat-open').textContent = r.openPositions;
+  $('stat-minSell').textContent = r.config.minSellSol + ' SOL';
+  $('stat-impact').textContent = '-' + r.config.minPriceImpactPct + '%';
+  $('stat-size').textContent = r.config.positionSizeSol + ' SOL';
+  $('stat-tp').textContent = '+' + r.config.takeProfitPct + '%';
+  $('stat-hold').textContent = r.config.maxHoldMs / 1000 + 's';
+  $('statusMeta').textContent = new Date().toLocaleTimeString();
+}
+
+async function refreshTokens() {
+  const r = await api('/api/tokens');
+  if (!r.ok) return;
+  const tbody = $('tokenTbody');
+  $('tokenCountMeta').textContent = r.tokens.filter(t => t.is_active).length + ' active / ' + r.tokens.length + ' total';
+  if (r.tokens.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty">尚未添加任何代币</td></tr>';
+    return;
+  }
+  tbody.innerHTML = r.tokens.map(t => `
+    <tr style="${t.is_active ? '' : 'opacity:0.4'}">
+      <td><b>${escapeHtml(t.symbol || 'UNKNOWN')}</b></td>
+      <td><a class="ca-link" href="https://gmgn.ai/sol/address/${t.mint}" target="_blank" rel="noopener">${t.mint.slice(0,4)}...${t.mint.slice(-4)}</a></td>
+      <td class="mono">${fmtMoney(t.fdv)}</td>
+      <td class="mono">${fmtMoney(t.liquidity)}</td>
+      <td class="mono">${t.price ? Number(t.price).toExponential(3) : '-'}</td>
+      <td class="mono">${fmtMoney(t.meta_json ? (JSON.parse(t.meta_json).volume24h || null) : null)}</td>
+      <td class="mono" style="font-size:11px;">${fmtTime(t.added_at)}</td>
+      <td><span class="pill ${t.source === 'webhook' ? 'live' : 'dry'}">${t.source || 'manual'}</span></td>
+      <td>${t.is_active ? `<button class="btn btn-sm btn-danger" onclick="removeToken('${t.mint}')">移除</button>` : '<span class="neutral">已移除</span>'}</td>
+    </tr>`).join('');
+}
+
+async function refreshPositions() {
+  const r = await api('/api/positions');
+  if (!r.ok) return;
+  const openTbody = $('openTbody');
+  if (r.open.length === 0) openTbody.innerHTML = '<tr><td colspan="7" class="empty">无</td></tr>';
+  else openTbody.innerHTML = r.open.map(p => {
+    const age = Math.floor((Date.now() - p.openedAt) / 1000);
+    return `<tr>
+      <td class="mono">${fmtTime(p.openedAt)}</td>
+      <td><b>${escapeHtml(p.symbol || p.mint.slice(0,6))}</b></td>
+      <td class="mono">${Number(p.entryPrice).toExponential(3)}</td>
+      <td class="mono neutral">live</td>
+      <td class="mono">${age}s</td>
+      <td class="mono neutral">-</td>
+      <td><span class="pill ${p.dryRun ? 'dry' : 'live'}">${p.dryRun ? 'DRY' : 'LIVE'}</span></td>
+    </tr>`;
+  }).join('');
+
+  const closedTbody = $('closedTbody');
+  const closed = r.recent.filter(p => p.closed_at);
+  if (closed.length === 0) closedTbody.innerHTML = '<tr><td colspan="8" class="empty">尚无平仓记录</td></tr>';
+  else closedTbody.innerHTML = closed.map(p => {
+    const pnlCls = (p.pnl_sol || 0) > 0 ? 'pos' : (p.pnl_sol || 0) < 0 ? 'neg' : 'neutral';
+    return `<tr>
+      <td class="mono">${fmtTime(p.opened_at)}</td>
+      <td><b>${escapeHtml(p.symbol || (p.mint || '').slice(0,6))}</b></td>
+      <td class="mono">${(p.entry_sol || 0).toFixed(4)}</td>
+      <td class="mono">${(p.exit_sol || 0).toFixed(4)}</td>
+      <td class="mono ${pnlCls}">${(p.pnl_sol || 0).toFixed(4)}</td>
+      <td class="mono ${pnlCls}">${(p.pnl_pct || 0).toFixed(2)}%</td>
+      <td>${p.exit_reason || '-'}</td>
+      <td><span class="pill ${p.dry_run ? 'dry' : 'live'}">${p.dry_run ? 'DRY' : 'LIVE'}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+async function refreshSignals() {
+  const r = await api('/api/signals?limit=200');
+  if (!r.ok) return;
+  const tbody = $('signalsTbody');
+  if (r.signals.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="empty">尚无信号</td></tr>'; return; }
+  tbody.innerHTML = r.signals.map(s => `
+    <tr>
+      <td class="mono">${fmtTime(s.ts)}</td>
+      <td><b>${escapeHtml(s.symbol || (s.mint || '').slice(0,6))}</b></td>
+      <td>${s.kind}</td>
+      <td class="mono">${(s.sell_sol || 0).toFixed(2)}</td>
+      <td class="mono ${(s.price_impact_pct||0) > 0 ? 'neg' : ''}">${(s.price_impact_pct||0).toFixed(2)}</td>
+      <td><span class="pill ${s.accepted ? 'success' : 'fail'}">${s.accepted ? '接受' : '拒绝'}</span></td>
+      <td style="color:var(--text-dim);font-size:11px;">${escapeHtml(s.notes || s.reject_reason || '')}</td>
+    </tr>`).join('');
+}
+
+async function refreshTrades() {
+  const r = await api('/api/trades?limit=200');
+  if (!r.ok) return;
+  const tbody = $('tradesTbody');
+  if (r.trades.length === 0) { tbody.innerHTML = '<tr><td colspan="10" class="empty">尚无交易</td></tr>'; return; }
+  tbody.innerHTML = r.trades.map(t => `
+    <tr>
+      <td class="mono">${fmtTime(t.ts)}</td>
+      <td><b>${escapeHtml(t.symbol || (t.mint || '').slice(0,6))}</b></td>
+      <td><span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span></td>
+      <td class="mono">${(t.sol_amount || 0).toFixed(4)}</td>
+      <td class="mono">${(t.token_amount || 0).toFixed(2)}</td>
+      <td class="mono">${t.price ? Number(t.price).toExponential(3) : '-'}</td>
+      <td><span class="pill ${t.success ? 'success' : 'fail'}">${t.success ? 'OK' : 'FAIL'}</span></td>
+      <td><span class="pill ${t.dry_run ? 'dry' : 'live'}">${t.dry_run ? 'DRY' : 'LIVE'}</span></td>
+      <td class="mono">${t.latency_ms || '-'}ms</td>
+      <td class="mono" style="font-size:10px;">${t.signature ? t.signature.slice(0,8) + '...' : '-'}</td>
+    </tr>`).join('');
+}
+
+async function refreshHealth() {
+  try {
+    const r = await api('/api/health');
+    if (!r.ok) return;
+    const rep = r.report;
+
+    // status meta
+    const statusEl = $('healthStatus');
+    if (rep.status === 'OK') {
+      statusEl.textContent = `OK · uptime ${formatUptime(rep.uptime_s)} · ${rep.mem_mb}MB`;
+      statusEl.style.color = 'var(--green)';
+    } else {
+      statusEl.textContent = `${rep.status} · ${rep.active_alerts.length} alert(s)`;
+      statusEl.style.color = 'var(--red)';
+    }
+
+    // alerts
+    const alertsBox = $('alertsBox');
+    if (rep.active_alerts.length === 0) {
+      alertsBox.style.display = 'none';
+      alertsBox.innerHTML = '';
+    } else {
+      alertsBox.style.display = 'block';
+      alertsBox.innerHTML = rep.active_alerts.map(a => {
+        const ago = Math.round((Date.now() - a.since) / 1000);
+        const ctxStr = a.context && Object.keys(a.context).length > 0
+          ? `<div class="ctx">${escapeHtml(JSON.stringify(a.context))}</div>` : '';
+        return `<div class="alert-banner ${a.severity}">
+          <span class="name">[${a.severity.toUpperCase()}] ${escapeHtml(a.name)}</span>
+          ${escapeHtml(a.message)}
+          <span style="color:var(--text-dim);font-size:11px;margin-left:8px;">${ago}s ago</span>
+          ${ctxStr}
+        </div>`;
+      }).join('');
+    }
+
+    // heartbeats
+    const hbBox = $('heartbeatsBox');
+    hbBox.innerHTML = Object.entries(rep.heartbeats).map(([name, h]) => {
+      const cls = h.status === 'OK' ? '' : (h.status === 'STALE' ? 'stale' : 'never');
+      const elapsed = h.elapsed_ms != null ? `${Math.round(h.elapsed_ms / 1000)}s ago` : 'never';
+      const icon = h.status === 'OK' ? '✅' : (h.status === 'STALE' ? '❌' : '⏳');
+      return `<div class="heartbeat-card ${cls}">
+        <div class="label">${icon} ${escapeHtml(name)}</div>
+        <div class="meta">${h.status} · ${elapsed}</div>
+        ${h.last_context ? `<div class="meta" style="color:var(--accent);">${escapeHtml(h.last_context)}</div>` : ''}
+      </div>`;
+    }).join('');
+
+    // counters by module
+    const cBox = $('countersBox');
+
+    // 信号漏斗概览（一眼看清楚转化）
+    const tt = rep.counters_total || {};
+    const txReceived = tt['TickStream.txReceived'] || 0;
+    const txParsed = tt['DumpDetector.txParsed'] || 0;
+    const priceTicks = tt['DumpDetector.priceTicks'] || 0;
+    const dumpSignals = tt['DumpDetector.dumpSignals'] || 0;
+    const accepted = tt['SignalEngine.signalsAccepted'] || 0;
+    const buyOk = tt['Executor.buySuccess'] || 0;
+    const sellOk = tt['Executor.sellSuccess'] || 0;
+    const winners = tt['PositionManager.winners'] || 0;
+    const losers = tt['PositionManager.losers'] || 0;
+
+    const funnelHtml = `
+      <div style="background:var(--panel-2);border:1px solid var(--border);border-radius:4px;padding:10px 12px;margin-bottom:10px;">
+        <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:6px;">📡 信号漏斗</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:6px;font-size:11px;font-family:'SF Mono',Consolas,monospace;">
+          <div><div style="color:var(--text-dim);">TX 收到</div><div style="font-weight:600;">${txReceived}</div></div>
+          <div><div style="color:var(--text-dim);">价格更新</div><div style="font-weight:600;">${priceTicks}</div></div>
+          <div><div style="color:var(--text-dim);">砸盘信号</div><div style="font-weight:600;color:${dumpSignals > 0 ? 'var(--yellow)' : 'var(--text)'};">${dumpSignals}</div></div>
+          <div><div style="color:var(--text-dim);">通过过滤</div><div style="font-weight:600;color:${accepted > 0 ? 'var(--accent)' : 'var(--text)'};">${accepted}</div></div>
+          <div><div style="color:var(--text-dim);">买入成功</div><div style="font-weight:600;">${buyOk}</div></div>
+          <div><div style="color:var(--text-dim);">卖出成功</div><div style="font-weight:600;">${sellOk}</div></div>
+          <div><div style="color:var(--text-dim);">盈利</div><div style="font-weight:600;color:var(--green);">${winners}</div></div>
+          <div><div style="color:var(--text-dim);">亏损</div><div style="font-weight:600;color:var(--red);">${losers}</div></div>
+        </div>
+      </div>`;
+
+    cBox.innerHTML = funnelHtml + Object.entries(rep.modules).map(([moduleName, counters]) => {
+      const rows = Object.entries(counters).sort().map(([k, v]) => {
+        const short = k.replace(`${moduleName}.`, '');
+        const isErr = /(error|fail|reject|stuck)/i.test(short) && v > 0;
+        return `<div class="counter-row"><span class="key">${escapeHtml(short)}</span><span class="val ${isErr ? 'err' : ''}">${v}</span></div>`;
+      }).join('');
+      return `<div style="margin-bottom:10px;">
+        <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:4px;">[${escapeHtml(moduleName)}]</div>
+        ${rows || '<div class="counter-row"><span class="key">-</span></div>'}
+      </div>`;
+    }).join('');
+
+    // errors
+    const errBox = $('errorsBox');
+    const errModules = Object.entries(rep.errors).filter(([_, e]) => e.length > 0);
+    if (errModules.length === 0) {
+      errBox.innerHTML = '<div class="empty" style="padding:10px;">无近期错误</div>';
+    } else {
+      errBox.innerHTML = errModules.map(([moduleName, errs]) => {
+        const blocks = errs.slice(0, 3).map(e => {
+          const ago = Math.round((Date.now() - e.ts) / 1000);
+          const ctxStr = e.context && Object.keys(e.context).length > 0
+            ? `<div class="ctx">${escapeHtml(JSON.stringify(e.context).slice(0, 200))}</div>` : '';
+          return `<div class="error-block">
+            <div class="msg">${escapeHtml(e.message || '')}</div>
+            <div class="ago">${ago}s ago</div>
+            ${ctxStr}
+          </div>`;
+        }).join('');
+        return `<div style="margin-bottom:8px;">
+          <div style="color:var(--accent);font-size:11px;font-weight:600;margin-bottom:4px;">[${escapeHtml(moduleName)}]</div>
+          ${blocks}
+        </div>`;
+      }).join('');
+    }
+  } catch (err) {
+    console.error('refreshHealth failed:', err);
+  }
+}
+
+function formatUptime(s) {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+async function refreshAll() {
+  await Promise.all([refreshStatus(), refreshTokens(), refreshPositions(), refreshSignals(), refreshTrades(), refreshHealth()]);
+}
+
+// ============ Actions ============
+async function addToken() {
+  const ca = $('addCa').value.trim();
+  const sym = $('addSymbol').value.trim();
+  if (!ca) { showToast('请输入 CA', 'error'); return; }
+  showToast('添加中...', 'info');
+  const r = await api('/api/tokens', { method: 'POST', body: JSON.stringify({ address: ca, symbol: sym }) });
+  if (r.ok) {
+    $('addCa').value = ''; $('addSymbol').value = '';
+    showToast(`已添加 ${r.token.symbol}`, 'ok');
+    refreshTokens();
+  } else {
+    showToast('添加失败: ' + r.error, 'error');
+  }
+}
+
+async function removeToken(mint) {
+  if (!confirm('确认移除该代币？')) return;
+  const r = await api('/api/tokens/' + mint, { method: 'DELETE' });
+  if (r.ok) { showToast('已移除', 'ok'); refreshTokens(); }
+  else showToast('移除失败: ' + r.error, 'error');
+}
+
+async function generateReport() {
+  $('reportResult').textContent = '生成中...';
+  const r = await api('/api/reports/generate', { method: 'POST', body: '{}' });
+  if (r.ok) $('reportResult').textContent = `已生成: ${r.filepath}`;
+  else $('reportResult').textContent = `失败: ${r.error}`;
+}
+
+// ============ Helpers ============
+function fmtTime(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+function fmtMoney(n) {
+  if (n === null || n === undefined) return '-';
+  if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return '$' + (n / 1e3).toFixed(2) + 'K';
+  return '$' + Number(n).toFixed(2);
+}
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function showToast(msg, kind = 'info') {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast ' + (kind === 'error' ? 'error' : kind === 'ok' ? 'ok' : '');
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.display = 'none', 3000);
+}
+
+// Tabs
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.tab-pane').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $('pane-' + t.dataset.tab).classList.add('active');
+  };
+});
+
+// Boot
+connectWs();
+refreshAll();
+setInterval(refreshAll, 3000);
+</script>
+</body>
+</html>
