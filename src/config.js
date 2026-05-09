@@ -91,7 +91,35 @@ const config = {
     logsDir: './logs',
   },
 
-  // ============ Misc ============
+  // ============ Priority fees ============
+  // BUY 和 SELL 分开配置：
+  //   - BUY 是抢 slot 的（砸盘后所有 sniper 同抢），需要高 fee
+  //   - SELL 是平仓的（晚 1-3 个 slot 落链没差别），低 fee 即可
+  // 实测竞争者：BUY 0.012-0.045 SOL，SELL <0.0001-0.003 SOL
+  priorityFee: {
+    // 静态模式（dynamic=false 时使用）
+    buyMaxLamports: parseInt(process.env.BUY_MAX_PRIORITY_FEE_LAMPORTS || '20000000', 10),  // 0.02 SOL
+    sellMaxLamports: parseInt(process.env.SELL_MAX_PRIORITY_FEE_LAMPORTS || '500000', 10),  // 0.0005 SOL
+
+    // 动态模式：用 Helius getPriorityFeeEstimate 查 mempool 实时拥堵
+    // 砸盘事件中整网 fee 飙升，动态调整能跟上竞争者节奏
+    dynamic: (process.env.PRIORITY_FEE_DYNAMIC ?? 'true').toLowerCase() === 'true',
+
+    // 动态模式参数
+    // BUY 用 high (75th) 或 veryHigh (95th)，SELL 用 medium (50th)
+    buyLevel: process.env.BUY_PRIORITY_LEVEL || 'veryHigh',  // 抢入用最高级别
+    sellLevel: process.env.SELL_PRIORITY_LEVEL || 'medium',  // 卖出用中等
+
+    // 动态查询的保底 (避免 RPC 返回 0/异常)
+    buyMinLamports: parseInt(process.env.BUY_MIN_PRIORITY_FEE_LAMPORTS || '10000000', 10),  // 0.01 SOL
+    sellMinLamports: parseInt(process.env.SELL_MIN_PRIORITY_FEE_LAMPORTS || '100000', 10),  // 0.0001 SOL
+
+    // 动态查询的上限 (即使 mempool 极拥堵也不超过)
+    buyCapLamports: parseInt(process.env.BUY_CAP_PRIORITY_FEE_LAMPORTS || '50000000', 10),  // 0.05 SOL
+    sellCapLamports: parseInt(process.env.SELL_CAP_PRIORITY_FEE_LAMPORTS || '2000000', 10), // 0.002 SOL
+  },
+
+  // 旧字段保留，向后兼容（仅用于 fallback）
   maxPriorityFeeLamports: parseInt(process.env.MAX_PRIORITY_FEE_LAMPORTS || '5000000', 10), // 0.005 SOL
 
   // 启动时是否自动尝试补充缺失的 pool 信息（PoolFinder）

@@ -231,7 +231,7 @@
 <body>
 
 <div class="header">
-  <h1>🎯 Dump Sniper <span class="v">v3.0</span></h1>
+  <h1>🎯 Dump Sniper <span class="v">v3.2</span></h1>
   <div class="badges">
     <span id="modeBadge" class="badge dry">DRY_RUN</span>
     <span id="wsBadge" class="badge ws disconnected">● WS</span>
@@ -295,15 +295,15 @@
         <h3 style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">当前开仓</h3>
         <div class="table-wrap" style="max-height:200px;">
           <table>
-            <thead><tr><th>开仓时间</th><th>Symbol</th><th>入场价</th><th>当前价</th><th>持有时间</th><th>未实现PnL%</th><th>模式</th></tr></thead>
+            <thead><tr><th>开仓时间</th><th>Symbol</th><th>CA</th><th>入场价</th><th>当前价</th><th>持有时间</th><th>未实现PnL%</th><th>模式</th></tr></thead>
             <tbody id="openTbody"><tr><td colspan="7" class="empty">无</td></tr></tbody>
           </table>
         </div>
         <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">最近平仓</h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>时间</th><th>Symbol</th><th>入场SOL</th><th>出场SOL</th><th>PnL SOL</th><th>PnL %</th><th>退出</th><th>模式</th></tr></thead>
-            <tbody id="closedTbody"><tr><td colspan="8" class="empty">尚无平仓记录</td></tr></tbody>
+            <thead><tr><th>时间</th><th>Symbol</th><th>CA</th><th>入场SOL</th><th>出场SOL</th><th>PnL SOL</th><th>PnL %</th><th>退出</th><th>模式</th></tr></thead>
+            <tbody id="closedTbody"><tr><td colspan="9" class="empty">尚无平仓记录</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -311,8 +311,8 @@
       <div class="tab-pane" id="pane-signals">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>时间</th><th>Symbol</th><th>类型</th><th>卖出SOL</th><th>跌幅%</th><th>状态</th><th>原因/备注</th></tr></thead>
-            <tbody id="signalsTbody"><tr><td colspan="7" class="empty">尚无信号</td></tr></tbody>
+            <thead><tr><th>时间</th><th>Symbol</th><th>CA</th><th>类型</th><th>卖出SOL</th><th>跌幅%</th><th>状态</th><th>原因/备注</th></tr></thead>
+            <tbody id="signalsTbody"><tr><td colspan="8" class="empty">尚无信号</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -320,8 +320,8 @@
       <div class="tab-pane" id="pane-trades">
         <div class="table-wrap">
           <table>
-            <thead><tr><th>时间</th><th>Symbol</th><th>方向</th><th>SOL</th><th>数量</th><th>价格</th><th>结果</th><th>模式</th><th>延迟</th><th>签名</th></tr></thead>
-            <tbody id="tradesTbody"><tr><td colspan="10" class="empty">尚无交易</td></tr></tbody>
+            <thead><tr><th>时间</th><th>Symbol</th><th>CA</th><th>方向</th><th>SOL</th><th>数量</th><th>价格</th><th>结果</th><th>模式</th><th>延迟</th><th>签名</th></tr></thead>
+            <tbody id="tradesTbody"><tr><td colspan="11" class="empty">尚无交易</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -442,7 +442,7 @@ async function refreshTokens() {
   tbody.innerHTML = r.tokens.map(t => `
     <tr style="${t.is_active ? '' : 'opacity:0.4'}">
       <td><b>${escapeHtml(t.symbol || 'UNKNOWN')}</b></td>
-      <td><a class="ca-link" href="https://gmgn.ai/sol/address/${t.mint}" target="_blank" rel="noopener">${t.mint.slice(0,4)}...${t.mint.slice(-4)}</a></td>
+      <td><a class="ca-link" href="https://gmgn.ai/sol/token/${t.mint}" target="_blank" rel="noopener">${t.mint.slice(0,4)}...${t.mint.slice(-4)}</a></td>
       <td class="mono">${fmtMoney(t.fdv)}</td>
       <td class="mono">${fmtMoney(t.liquidity)}</td>
       <td class="mono">${t.price ? Number(t.price).toExponential(3) : '-'}</td>
@@ -453,16 +453,22 @@ async function refreshTokens() {
     </tr>`).join('');
 }
 
+function caCell(mint) {
+  if (!mint) return '<td>-</td>';
+  return `<td><a class="ca-link" href="https://gmgn.ai/sol/token/${mint}" target="_blank" rel="noopener">${mint.slice(0,4)}...${mint.slice(-4)}</a></td>`;
+}
+
 async function refreshPositions() {
   const r = await api('/api/positions');
   if (!r.ok) return;
   const openTbody = $('openTbody');
-  if (r.open.length === 0) openTbody.innerHTML = '<tr><td colspan="7" class="empty">无</td></tr>';
+  if (r.open.length === 0) openTbody.innerHTML = '<tr><td colspan="8" class="empty">无</td></tr>';
   else openTbody.innerHTML = r.open.map(p => {
     const age = Math.floor((Date.now() - p.openedAt) / 1000);
     return `<tr>
       <td class="mono">${fmtTime(p.openedAt)}</td>
       <td><b>${escapeHtml(p.symbol || p.mint.slice(0,6))}</b></td>
+      ${caCell(p.mint)}
       <td class="mono">${Number(p.entryPrice).toExponential(3)}</td>
       <td class="mono neutral">live</td>
       <td class="mono">${age}s</td>
@@ -473,12 +479,13 @@ async function refreshPositions() {
 
   const closedTbody = $('closedTbody');
   const closed = r.recent.filter(p => p.closed_at);
-  if (closed.length === 0) closedTbody.innerHTML = '<tr><td colspan="8" class="empty">尚无平仓记录</td></tr>';
+  if (closed.length === 0) closedTbody.innerHTML = '<tr><td colspan="9" class="empty">尚无平仓记录</td></tr>';
   else closedTbody.innerHTML = closed.map(p => {
     const pnlCls = (p.pnl_sol || 0) > 0 ? 'pos' : (p.pnl_sol || 0) < 0 ? 'neg' : 'neutral';
     return `<tr>
       <td class="mono">${fmtTime(p.opened_at)}</td>
       <td><b>${escapeHtml(p.symbol || (p.mint || '').slice(0,6))}</b></td>
+      ${caCell(p.mint)}
       <td class="mono">${(p.entry_sol || 0).toFixed(4)}</td>
       <td class="mono">${(p.exit_sol || 0).toFixed(4)}</td>
       <td class="mono ${pnlCls}">${(p.pnl_sol || 0).toFixed(4)}</td>
@@ -493,11 +500,12 @@ async function refreshSignals() {
   const r = await api('/api/signals?limit=200');
   if (!r.ok) return;
   const tbody = $('signalsTbody');
-  if (r.signals.length === 0) { tbody.innerHTML = '<tr><td colspan="7" class="empty">尚无信号</td></tr>'; return; }
+  if (r.signals.length === 0) { tbody.innerHTML = '<tr><td colspan="8" class="empty">尚无信号</td></tr>'; return; }
   tbody.innerHTML = r.signals.map(s => `
     <tr>
       <td class="mono">${fmtTime(s.ts)}</td>
       <td><b>${escapeHtml(s.symbol || (s.mint || '').slice(0,6))}</b></td>
+      ${caCell(s.mint)}
       <td>${s.kind}</td>
       <td class="mono">${(s.sell_sol || 0).toFixed(2)}</td>
       <td class="mono ${(s.price_impact_pct||0) > 0 ? 'neg' : ''}">${(s.price_impact_pct||0).toFixed(2)}</td>
@@ -510,11 +518,12 @@ async function refreshTrades() {
   const r = await api('/api/trades?limit=200');
   if (!r.ok) return;
   const tbody = $('tradesTbody');
-  if (r.trades.length === 0) { tbody.innerHTML = '<tr><td colspan="10" class="empty">尚无交易</td></tr>'; return; }
+  if (r.trades.length === 0) { tbody.innerHTML = '<tr><td colspan="11" class="empty">尚无交易</td></tr>'; return; }
   tbody.innerHTML = r.trades.map(t => `
     <tr>
       <td class="mono">${fmtTime(t.ts)}</td>
       <td><b>${escapeHtml(t.symbol || (t.mint || '').slice(0,6))}</b></td>
+      ${caCell(t.mint)}
       <td><span class="pill ${t.side === 'BUY' ? 'buy' : 'sell'}">${t.side}</span></td>
       <td class="mono">${(t.sol_amount || 0).toFixed(4)}</td>
       <td class="mono">${(t.token_amount || 0).toFixed(2)}</td>

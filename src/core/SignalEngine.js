@@ -5,7 +5,9 @@ const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
 
 const monitor = getMonitor();
-monitor.registerModule('SignalEngine', { staleMs: 600_000, label: 'Signal Engine' });
+// SignalEngine 只在收到 dump 信号时 beat，没信号时不会心跳。砸盘信号本来就稀疏，
+// 阈值 600s（10min）会经常误报。改 1h；如果 1h 没有任何砸盘信号才算异常。
+monitor.registerModule('SignalEngine', { staleMs: 3600_000, label: 'Signal Engine' });
 
 /**
  * SignalEngine

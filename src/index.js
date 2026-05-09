@@ -26,7 +26,8 @@ async function main() {
   console.log(`TP: +${config.strategy.takeProfitPct}% (need ${config.strategy.tpConfirmCount}x confirm)`);
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
   console.log(`Max hold: ${config.strategy.maxHoldMs}ms`);
-  console.log(`Jupiter: ${config.jupiter.baseUrl}${config.jupiter.apiKey ? ' [PRO]' : ' [free]'}`);
+  console.log(`Executor: Pump AMM SDK direct (no Jupiter)`);
+  console.log(`Compute units: ${process.env.COMPUTE_UNIT_LIMIT || 300000}, max priority fee: ${config.maxPriorityFeeLamports} lamports`);
   console.log('================================================');
 
   const errors = validateConfig();
