@@ -156,6 +156,12 @@ class TradeLogger {
                               last_retry_at = ?
          WHERE position_id = ?`,
       ),
+      // v3.6: BUY 落链后用真实链上数据修正 entry
+      updatePositionEntry: this.db.prepare(
+        `UPDATE positions
+         SET entry_sol = ?, entry_price = ?, token_amount = ?, buy_fee_lamports = ?
+         WHERE position_id = ?`,
+      ),
       // v3.3: 标记 sell 已提交，等待链上确认
       markSellPending: this.db.prepare(
         `UPDATE positions SET status = 'sell_confirming', pending_sell_signature = ?,
@@ -270,6 +276,17 @@ class TradeLogger {
 
   recordSellAttempt(positionId, errorMsg) {
     this.stmts.updatePositionAttempt.run(errorMsg || null, Date.now(), positionId);
+  }
+
+  // v3.6: BUY 落链后用真实链上 SOL/token 修正 entry（解决 sizeSol vs 实际花费的偏差）
+  updatePositionEntry(positionId, entry) {
+    this.stmts.updatePositionEntry.run(
+      entry.entrySol ?? null,
+      entry.entryPrice ?? null,
+      entry.tokenAmount ?? null,
+      entry.buyFeeLamports ?? 0,
+      positionId,
+    );
   }
 
   // v3.3: 标记 sell 已提交、等待链上确认

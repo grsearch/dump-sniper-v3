@@ -202,7 +202,149 @@ class PositionManager extends EventEmitter {
     monitor.inc('PositionManager.opened', 1, 'PositionManager');
     monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
     this.emit('opened', pos);
+
+    // v3.6: 异步等链上确认并用真实数据修正 position
+    // 这是关键 PnL 准确性修复：sizeSol 是配置值（如 3.0），但实际链上花费可能是 2.6
+    // SDK 的 buyQuoteInput 把 quote 当 max；slippage 让链上以更优价格成交，少花一些 SOL
+    if (!dryRun && signature && !signature.startsWith('DRYRUN')) {
+      this._reconcileBuyAsync(pid, mint, signature).catch((err) => {
+        monitor.recordError('PositionManager', err, {
+          phase: 'reconcile_buy',
+          mint,
+          signature,
+        });
+      });
+    }
     return pos;
+  }
+
+  /**
+   * v3.6: BUY 提交后异步等链上确认，用真实 SOL 出账 / 真实 token 入账 修正 position
+   * 解决 BUY 实际花费 ≠ 配置 sizeSol 的问题（典型偏差 5-15%）
+   */
+  async _reconcileBuyAsync(positionId, mint, signature) {
+    // v3.7: 等 1 秒让 tx 落链（BUY 通常 400-800ms 落链，1s 是合理初始延迟）
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // 短超时确认（confirmTx 内部 poll，最多 8 秒）
+    const result = await this.executor.confirmTx(signature, {
+      timeoutMs: 8_000,
+      pollIntervalMs: 500,
+    });
+
+    const pos = this.positions.get(positionId);
+    if (!pos) return; // position 已被外部清理
+
+    // ============ 分支 A: BUY tx 链上失败 ============
+    // 这是 Openclaw 截图描述的关键 bug：BUY 提交成功但链上失败
+    // → program 以为买到了 → 拼命 SELL 不存在的 token → 28 笔 3012 错误烧 fee
+    // 修复：检测到 BUY 链上失败 → 强制关闭 position（PnL 标记真实损失：仅 fee）
+    if (!result.confirmed) {
+      monitor.inc('PositionManager.buyChainFail', 1, 'PositionManager');
+      const errMsg = result.error || 'not_landed';
+      console.error(
+        `[PositionManager] ⚠️ BUY tx FAILED on chain: ${pos.symbol || mint.slice(0, 6)} ` +
+          `sig=${signature.slice(0, 8)}.. error=${errMsg}`,
+      );
+
+      // 真实损失 = 已付 priority fee + base fee（链上 tx 失败也扣 fee）
+      // 没买到 token，所以 exitSol = 0, tokenAmount 应该是 0
+      const feeSol = ((pos.buyFeeLamports || 0) + 5000) / 1e9;
+
+      this.tradeLogger.closePosition(positionId, {
+        closedAt: Date.now(),
+        exitPrice: pos.entryPrice,
+        exitSol: 0,
+        pnlSol: -feeSol, // 仅损失 fee
+        pnlPct: -100,
+        exitReason: 'BUY_CHAIN_FAILED',
+        sellSignature: null,
+      });
+
+      this.positions.delete(positionId);
+      this.byMint.delete(mint);
+      monitor.inc('PositionManager.buyFailedClosed', 1, 'PositionManager');
+      monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
+      monitor.recordError('PositionManager', new Error('BUY chain failed'), {
+        mint,
+        symbol: pos.symbol,
+        signature,
+        error: errMsg,
+      });
+      this.emit('buyChainFailed', { positionId, mint, symbol: pos.symbol, signature, error: errMsg });
+      return;
+    }
+
+    // ============ 分支 B: BUY 链上成功，但解析失败 ============
+    const swap = await this.executor.fetchTxSwapResult(signature, mint);
+    if (!swap || !swap.success) {
+      // confirmTx 说成功但 fetchTxSwapResult 说 success=false → tx 落链但执行失败
+      // 等价于 BUY 失败
+      monitor.inc('PositionManager.buyReconcileFetchFail', 1, 'PositionManager');
+      console.error(
+        `[PositionManager] ⚠️ BUY confirmed but tx parse failed: ${pos.symbol || mint.slice(0, 6)} ` +
+          `sig=${signature.slice(0, 8)}..`,
+      );
+      // 同样按链上失败处理（保险起见）
+      const feeSol = ((pos.buyFeeLamports || 0) + 5000) / 1e9;
+      this.tradeLogger.closePosition(positionId, {
+        closedAt: Date.now(),
+        exitPrice: pos.entryPrice,
+        exitSol: 0,
+        pnlSol: -feeSol,
+        pnlPct: -100,
+        exitReason: 'BUY_PARSE_FAILED',
+        sellSignature: null,
+      });
+      this.positions.delete(positionId);
+      this.byMint.delete(mint);
+      monitor.inc('PositionManager.buyFailedClosed', 1, 'PositionManager');
+      monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
+      return;
+    }
+
+    // ============ 分支 C: BUY 成功，回写真实数据 ============
+    // realSolDelta 是负数（出账）。priority fee + base fee 也含在内
+    const realSolSpent = -swap.realSolDelta;
+    const realTokenReceived = swap.realTokenDelta;
+
+    if (realSolSpent <= 0 || realTokenReceived <= 0) {
+      monitor.recordError('PositionManager', new Error('reconcile: invalid swap deltas'), {
+        signature,
+        realSolSpent,
+        realTokenReceived,
+      });
+      return;
+    }
+
+    const oldEntrySol = pos.entrySol;
+    const oldEntryPrice = pos.entryPrice;
+    const oldTokenAmount = pos.tokenAmount;
+
+    // 修正：扣掉 priority fee + base fee，剩下的才是真正花在 swap 上
+    // 但对策略判断来说，"我亏了多少 SOL" 用 realSolSpent 全口径比较合理
+    pos.entrySol = realSolSpent;
+    pos.tokenAmount = realTokenReceived;
+    pos.entryPrice = realSolSpent / realTokenReceived;
+    // realSolSpent 已含 priority fee 与 base fee；为避免双重扣减，把 buyFeeLamports 清零
+    pos.buyFeeLamports = 0;
+
+    // 同步到 DB
+    this.tradeLogger.updatePositionEntry(positionId, {
+      entrySol: pos.entrySol,
+      entryPrice: pos.entryPrice,
+      tokenAmount: pos.tokenAmount,
+      buyFeeLamports: 0,
+    });
+
+    monitor.inc('PositionManager.buyReconciled', 1, 'PositionManager');
+    const drift = ((realSolSpent - oldEntrySol) / oldEntrySol) * 100;
+    console.log(
+      `[PositionManager] 🔧 BUY reconciled ${pos.symbol || mint.slice(0, 6)}: ` +
+        `entrySol ${oldEntrySol.toFixed(4)}→${realSolSpent.toFixed(4)} (${drift.toFixed(2)}%), ` +
+        `tokens ${oldTokenAmount.toFixed(2)}→${realTokenReceived.toFixed(2)}, ` +
+        `entryPrice ${oldEntryPrice.toExponential(4)}→${pos.entryPrice.toExponential(4)}`,
+    );
   }
 
   _tick() {

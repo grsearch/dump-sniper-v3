@@ -49,7 +49,7 @@ class PoolStateCache {
     this.user = user;
     this.getMintList = getMintList;
     this.refreshIntervalMs = parseInt(
-      process.env.POOL_STATE_REFRESH_MS || refreshIntervalMs || '1000',
+      process.env.POOL_STATE_REFRESH_MS || refreshIntervalMs || '2000',
       10,
     );
 

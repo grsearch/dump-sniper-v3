@@ -246,6 +246,74 @@ class Executor {
   }
 
   /**
+   * v3.6: 解析已落链 tx 的真实成交结果。
+   * 用于 BUY 后回写 position 的真实 entrySol（避免 sizeSol vs 实际花费的差异）。
+   *
+   * 返回 { realSolDelta, realTokenDelta, fee, success } 或 null（tx 未找到）
+   *   realSolDelta:  钱包 SOL 净变化（负数 = 花了多少 SOL，含 priority fee）
+   *   realTokenDelta: 钱包对应 mint 净变化（正数 = 收到多少 token UI amount）
+   *   fee:            tx 的 base fee（lamports）
+   */
+  async fetchTxSwapResult(signature, mint) {
+    if (!signature || signature.startsWith('DRYRUN')) return null;
+    if (!this.keypair) return null;
+    try {
+      const tx = await this.rpc.getTransaction(signature, {
+        commitment: 'confirmed',
+        maxSupportedTransactionVersion: 0,
+      });
+      if (!tx || !tx.meta) return null;
+
+      const owner = this.keypair.publicKey.toBase58();
+
+      // SOL 净变化
+      // accountKeys 顺序与 preBalances/postBalances 一致
+      const keys = tx.transaction.message.accountKeys || tx.transaction.message.staticAccountKeys || [];
+      const ownerIdx = keys.findIndex((k) => {
+        const s = typeof k === 'string' ? k : k.pubkey || k.toString?.();
+        return s === owner;
+      });
+      let realSolDelta = 0;
+      if (ownerIdx >= 0) {
+        const pre = tx.meta.preBalances[ownerIdx] || 0;
+        const post = tx.meta.postBalances[ownerIdx] || 0;
+        realSolDelta = (post - pre) / 1e9; // SOL
+      }
+
+      // Token 净变化（对应 mint）
+      let realTokenDelta = 0;
+      const preTok = tx.meta.preTokenBalances || [];
+      const postTok = tx.meta.postTokenBalances || [];
+      for (const post of postTok) {
+        if (post.owner !== owner || post.mint !== mint) continue;
+        const pre = preTok.find((p) => p.accountIndex === post.accountIndex);
+        const preUi = pre?.uiTokenAmount?.uiAmount || 0;
+        const postUi = post.uiTokenAmount?.uiAmount || 0;
+        realTokenDelta += postUi - preUi;
+      }
+      // 也要检查 pre 里有但 post 里没有的（账户被关闭的场景）
+      for (const pre of preTok) {
+        if (pre.owner !== owner || pre.mint !== mint) continue;
+        const inPost = postTok.find((p) => p.accountIndex === pre.accountIndex);
+        if (!inPost) {
+          const preUi = pre.uiTokenAmount?.uiAmount || 0;
+          realTokenDelta -= preUi;
+        }
+      }
+
+      return {
+        realSolDelta,
+        realTokenDelta,
+        fee: tx.meta.fee || 0,
+        success: !tx.meta.err,
+      };
+    } catch (err) {
+      monitor.recordError('Executor', err, { phase: 'fetchTxSwapResult', signature });
+      return null;
+    }
+  }
+
+  /**
    * 构造、签名 tx。Side ('BUY' or 'SELL') 决定使用哪个 priority fee 等级。
    */
   async _buildAndSignTx(swapInstructions, side) {
