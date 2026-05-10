@@ -177,6 +177,9 @@ class PositionManager extends EventEmitter {
       sellAttempts: 0,
       _tpConfirmCount: 0,
       _tpFirstTriggerTs: null,
+      // v3.12: 等 _reconcileBuyAsync 完成才允许触发 exit；防止用错的 entryPrice 误判 PnL
+      // DRY_RUN 不走 reconcile，直接标 true
+      reconciled: !!dryRun,
     };
     this.positions.set(pid, pos);
     this.byMint.set(mint, pid);
@@ -329,6 +332,10 @@ class PositionManager extends EventEmitter {
     // realSolSpent 已含 priority fee 与 base fee；为避免双重扣减，把 buyFeeLamports 清零
     pos.buyFeeLamports = 0;
 
+    // v3.12: 标记 reconciled，解除 _checkExit 的临时锁定（开始允许 exit 触发）
+    // 此时 entryPrice 是真实成交价，PnL% 计算才准确
+    pos.reconciled = true;
+
     // 同步到 DB
     this.tradeLogger.updatePositionEntry(positionId, {
       entrySol: pos.entrySol,
@@ -379,6 +386,17 @@ class PositionManager extends EventEmitter {
   _checkExit(positionId, price) {
     const pos = this.positions.get(positionId);
     if (!pos || pos.exiting) return;
+
+    // v3.12 关键修复：reconcile 完成前不允许触发任何 exit
+    // 在 BUY 链上确认 + 真实 entrySol 回写之前，pos.entryPrice 是基于 sizeSol 估算
+    // 实测偏差 5-15%，会让 PnL% 假象 -15% 触发误 EMERGENCY_STOP
+    // 或假象 +8% 触发误 TAKE_PROFIT
+    //
+    // 设计：reconcile 完成时设置 pos.reconciled=true；之前的 ticks 全部跳过
+    // 例外：MAX_HOLD_MS 超时（_tick 那条路径）— 因为 15s 超时永远是事实
+    if (!pos.reconciled && !pos.dryRun) {
+      return; // 等 reconcile（约 1 秒）
+    }
 
     const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
 
