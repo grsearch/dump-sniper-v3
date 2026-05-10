@@ -89,17 +89,13 @@ class SignalEngine extends EventEmitter {
     // 通过 → 触发买入
     monitor.inc('SignalEngine.signalsAccepted', 1, 'SignalEngine');
     this.lastTriggerTs.set(mint, Date.now());
-    this.tradeLogger.logSignal({
-      ts,
-      mint,
-      symbol,
-      kind: 'BUY_SIGNAL',
-      sellSol,
-      priceImpactPct,
-      seller,
-      sellerTx: signature,
-      notes: `dump signal accepted; sellSol=${sellSol.toFixed(2)}, impact=${priceImpactPct.toFixed(2)}%`,
-      accepted: true,
+
+    // v3.10: 先 emit buyOrder（让 Executor 立即开始工作），再异步写 DB
+    // SQLite WAL 模式下写入也要 1-3ms，省下来给关键路径
+    this.emit('buyOrder', {
+      ...signal,
+      reason: `dump: sell ${sellSol.toFixed(2)} SOL, impact -${priceImpactPct.toFixed(2)}%`,
+      sizeSol: config.strategy.positionSizeSol,
     });
 
     console.log(
@@ -108,10 +104,24 @@ class SignalEngine extends EventEmitter {
       )} SOL, impact=-${priceImpactPct.toFixed(2)}%`,
     );
 
-    this.emit('buyOrder', {
-      ...signal,
-      reason: `dump: sell ${sellSol.toFixed(2)} SOL, impact -${priceImpactPct.toFixed(2)}%`,
-      sizeSol: config.strategy.positionSizeSol,
+    // 异步写 DB（不阻塞 BUY 路径）
+    setImmediate(() => {
+      try {
+        this.tradeLogger.logSignal({
+          ts,
+          mint,
+          symbol,
+          kind: 'BUY_SIGNAL',
+          sellSol,
+          priceImpactPct,
+          seller,
+          sellerTx: signature,
+          notes: `dump signal accepted; sellSol=${sellSol.toFixed(2)}, impact=${priceImpactPct.toFixed(2)}%`,
+          accepted: true,
+        });
+      } catch (err) {
+        monitor.recordError('SignalEngine', err, { phase: 'logSignal_async' });
+      }
     });
   }
 

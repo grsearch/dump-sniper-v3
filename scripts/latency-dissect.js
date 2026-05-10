@@ -71,7 +71,7 @@ async function getBlock(slot) {
   return r.result;
 }
 
-function findPumpSwapsInBlock(block) {
+function findPumpSwapsInBlock(block, mintFilter = null) {
   if (!block || !block.transactions) return [];
   const swaps = [];
   for (let i = 0; i < block.transactions.length; i++) {
@@ -81,10 +81,19 @@ function findPumpSwapsInBlock(block) {
     const keys = tx.transaction?.message?.accountKeys || [];
     const hasPump = keys.some((k) => (typeof k === 'string' ? k : k.pubkey) === PUMP_AMM);
     if (!hasPump) continue;
+    // 如果指定了 mint，过滤只保留涉及该 mint 的 tx
+    if (mintFilter) {
+      const hasMint = keys.some((k) => (typeof k === 'string' ? k : k.pubkey) === mintFilter);
+      if (!hasMint) continue;
+    }
     const sig = tx.transaction?.signatures?.[0];
     const fee = tx.meta?.fee || 0;
+    const cu = tx.meta?.computeUnitsConsumed || 0;
+    // microLamports/CU = (fee - 5000 base) * 1M / CU
+    const priorityFeeLamports = Math.max(0, fee - 5000);
+    const microLamportsPerCu = cu > 0 ? Math.round((priorityFeeLamports * 1_000_000) / cu) : 0;
     const feePayer = typeof keys[0] === 'string' ? keys[0] : keys[0]?.pubkey;
-    swaps.push({ index: i, signature: sig, fee, feePayer });
+    swaps.push({ index: i, signature: sig, fee, cu, microLamportsPerCu, feePayer });
   }
   return swaps;
 }
@@ -151,24 +160,34 @@ async function dissectBuy(buyRow) {
   console.log(`    总计 (砸盘落链 → 我们 BUY 落链):                ${formatMs(total)}`);
 
   // 同 slot / 下一 slot 的所有 Pump 交易（识别竞争者）
-  console.log(`\n  🔍 dump slot ${dumpSlot} 内的所有 Pump swap:`);
+  // v3.10: 过滤同 mint，按 microLamports/CU 排序，看排名
+  console.log(`\n  🔍 dump slot ${dumpSlot} 内涉及 ${(buyRow.mint || '').slice(0, 8)}.. 的所有 Pump swap:`);
+  console.log(`     (按链上打包顺序，同 slot 内 leader 按 microLamports/CU 排序)`);
   const dumpBlock = await getBlock(dumpSlot);
-  const dumpSwaps = findPumpSwapsInBlock(dumpBlock);
+  const dumpSwaps = findPumpSwapsInBlock(dumpBlock, buyRow.mint);
   for (const s of dumpSwaps) {
     const isOurs = s.signature === buyRow.signature;
     const isTrigger = s.signature === trigger.seller_tx;
     const tag = isOurs ? '🎯 你' : isTrigger ? '🔥 砸单' : '';
-    console.log(`    [${s.index.toString().padStart(3)}] ${s.feePayer.slice(0, 8)}.. fee=${s.fee} lamports ${tag}`);
+    console.log(
+      `    [${s.index.toString().padStart(3)}] ${s.feePayer.slice(0, 8)}.. ` +
+        `fee=${s.fee.toString().padStart(8)} CU=${s.cu.toString().padStart(6)} ` +
+        `μL/CU=${s.microLamportsPerCu.toString().padStart(7)} ${tag}`,
+    );
   }
 
   if (buySlot !== dumpSlot) {
-    console.log(`\n  🔍 buy slot ${buySlot} 内的所有 Pump swap:`);
+    console.log(`\n  🔍 buy slot ${buySlot} 内涉及 ${(buyRow.mint || '').slice(0, 8)}.. 的所有 Pump swap:`);
     const buyBlock = await getBlock(buySlot);
-    const buySwaps = findPumpSwapsInBlock(buyBlock);
+    const buySwaps = findPumpSwapsInBlock(buyBlock, buyRow.mint);
     for (const s of buySwaps) {
       const isOurs = s.signature === buyRow.signature;
       const tag = isOurs ? '🎯 你' : '';
-      console.log(`    [${s.index.toString().padStart(3)}] ${s.feePayer.slice(0, 8)}.. fee=${s.fee} lamports ${tag}`);
+      console.log(
+        `    [${s.index.toString().padStart(3)}] ${s.feePayer.slice(0, 8)}.. ` +
+          `fee=${s.fee.toString().padStart(8)} CU=${s.cu.toString().padStart(6)} ` +
+          `μL/CU=${s.microLamportsPerCu.toString().padStart(7)} ${tag}`,
+      );
     }
   }
 
