@@ -9,8 +9,13 @@ const config = {
   // ============ Strategy ============
   strategy: {
     // 触发条件（DumpDetector）
-    minSellSol: parseFloat(process.env.MIN_SELL_SOL || '10.0'),
-    minPriceImpactPct: parseFloat(process.env.MIN_PRICE_IMPACT_PCT || '10.0'),
+    minSellSol: parseFloat(process.env.MIN_SELL_SOL || '15.0'),
+    minPriceImpactPct: parseFloat(process.env.MIN_PRICE_IMPACT_PCT || '12.0'),
+    // v3.10: 实盘观察 — 阈值过宽抓"伪砸盘"（大池子 10 SOL 卖单价格几乎不动），
+    // 也抓"流动性已死"（小池子 30%+ impact 但反弹空间小且滑点巨大）
+    // 加这两条过滤
+    maxPriceImpactPct: parseFloat(process.env.MAX_PRICE_IMPACT_PCT || '30.0'),
+    minPoolQuoteSol: parseFloat(process.env.MIN_POOL_QUOTE_SOL || '30.0'),
 
     // 仓位
     positionSizeSol: parseFloat(process.env.POSITION_SIZE_SOL || '0.1'),
@@ -115,7 +120,7 @@ const config = {
     sellMinLamports: parseInt(process.env.SELL_MIN_PRIORITY_FEE_LAMPORTS || '100000', 10),  // 0.0001 SOL
 
     // 动态查询的上限 (即使 mempool 极拥堵也不超过)
-    buyCapLamports: parseInt(process.env.BUY_CAP_PRIORITY_FEE_LAMPORTS || '50000000', 10),  // 0.05 SOL
+    buyCapLamports: parseInt(process.env.BUY_CAP_PRIORITY_FEE_LAMPORTS || '200000000', 10),  // 0.2 SOL — v3.11: 之前 0.05 SOL cap 把 μL/CU 卡死在 250K，竞争者实测 40M+ μL/CU
     sellCapLamports: parseInt(process.env.SELL_CAP_PRIORITY_FEE_LAMPORTS || '2000000', 10), // 0.002 SOL
   },
 

@@ -73,17 +73,27 @@ class DumpDetector extends EventEmitter {
 
       const sellSol = parsed.quoteAmount; // 用户得到的 quote (SOL)
       const priceImpactPct = -parsed.priceChangePct; // 转为正数表示跌幅
+      const poolQuoteAfter = parsed.poolQuoteAfter; // 池子 SOL 余额
 
+      // v3.10: 三条过滤
+      // 1. sellSol 下限（决心卖单）
+      // 2. priceImpact 在区间 [min, max]：太小没反弹空间；太大说明池子已经空了/流动性危险
+      // 3. 池子流动性下限：太小的池子进出滑点大，容易亏在 spread 上
       const passSize = sellSol >= config.strategy.minSellSol;
-      const passImpact = priceImpactPct >= config.strategy.minPriceImpactPct;
+      const passImpact = priceImpactPct >= config.strategy.minPriceImpactPct
+                      && priceImpactPct <= config.strategy.maxPriceImpactPct;
+      const passLiquidity = poolQuoteAfter >= config.strategy.minPoolQuoteSol;
+      const passAll = passSize && passImpact && passLiquidity;
 
       this.emit('sellAnalyzed', {
         mint: parsed.baseMint,
         symbol: parsed.symbol,
         sellSol,
         priceImpactPct,
+        poolQuoteAfter,
         passSize,
         passImpact,
+        passLiquidity,
         seller: parsed.signer,
         signature: parsed.signature,
         ts: parsed.ts,
@@ -92,13 +102,14 @@ class DumpDetector extends EventEmitter {
         priceBefore: parsed.priceBefore,
       });
 
-      if (passSize && passImpact) {
+      if (passAll) {
         monitor.inc('DumpDetector.dumpSignals', 1, 'DumpDetector');
         this.emit('dumpSignal', {
           mint: parsed.baseMint,
           symbol: parsed.symbol,
           sellSol,
           priceImpactPct,
+          poolQuoteAfter,
           seller: parsed.signer,
           signature: parsed.signature,
           ts: parsed.ts,
@@ -265,6 +276,9 @@ class DumpDetector extends EventEmitter {
       poolAddress: tokenInfo.pool_address,
       poolBaseVault,
       poolQuoteVault,
+      // v3.10: 池子状态（用于流动性过滤）
+      poolQuoteAfter: quoteAfter,  // 砸盘后池子 SOL 余额（关键：过滤微盘 / 已撤池）
+      poolBaseAfter: baseAfter,
     };
   }
 

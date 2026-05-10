@@ -135,10 +135,23 @@ async function main() {
 
   // sellAnalyzed: 只记录"接近触发"的（半阈值），避免写入风暴
   dumpDetector.on('sellAnalyzed', (info) => {
-    if (info.passSize && info.passImpact) return; // 已 dumpSignal
+    if (info.passSize && info.passImpact && info.passLiquidity) return; // 已 dumpSignal
     const halfSize = config.strategy.minSellSol * 0.5;
     const halfImpact = config.strategy.minPriceImpactPct * 0.5;
     if (info.sellSol < halfSize || info.priceImpactPct < halfImpact) return;
+    // 构造可读的拒绝原因
+    const reasons = [];
+    if (!info.passSize) reasons.push(`size:${info.sellSol.toFixed(1)}<${config.strategy.minSellSol}`);
+    if (!info.passImpact) {
+      if (info.priceImpactPct < config.strategy.minPriceImpactPct) {
+        reasons.push(`impact:${info.priceImpactPct.toFixed(1)}%<${config.strategy.minPriceImpactPct}%`);
+      } else {
+        reasons.push(`impact:${info.priceImpactPct.toFixed(1)}%>${config.strategy.maxPriceImpactPct}% (pool dead?)`);
+      }
+    }
+    if (!info.passLiquidity) {
+      reasons.push(`liq:${(info.poolQuoteAfter ?? 0).toFixed(0)} SOL<${config.strategy.minPoolQuoteSol}`);
+    }
     tradeLogger.logSignal({
       ts: info.ts,
       mint: info.mint,
@@ -148,9 +161,9 @@ async function main() {
       priceImpactPct: info.priceImpactPct,
       seller: info.seller,
       sellerTx: info.signature,
-      notes: `near-miss: passSize=${info.passSize}, passImpact=${info.passImpact}`,
+      notes: `near-miss: ${reasons.join(', ')}`,
       accepted: false,
-      rejectReason: 'thresholds not met',
+      rejectReason: reasons.join('; '),
     });
   });
 
