@@ -201,6 +201,7 @@ class Server {
         ok: true,
         open: this.positionManager.listOpen(),
         recent: this.tradeLogger.getRecentPositions(limit),
+        stuck: this.tradeLogger.getStuckPositions(),
       });
     });
 

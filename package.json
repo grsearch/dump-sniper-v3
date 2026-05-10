@@ -1,6 +1,6 @@
 {
   "name": "dump-sniper",
-  "version": "3.2.0",
+  "version": "3.4.0",
   "description": "Solana Pump.fun dump-rebound sniper. Detects large sell orders with high price impact, executes counter-trade buys via direct Pump AMM SDK, exits on rebound or timeout.",
   "main": "src/index.js",
   "scripts": {
@@ -9,7 +9,8 @@
     "health": "node scripts/health.js",
     "health:json": "node scripts/health.js --json",
     "fill-pools": "node scripts/fill-pools.js",
-    "latency": "node scripts/latency-analyze.js"
+    "latency": "node scripts/latency-analyze.js",
+    "stuck": "node scripts/stuck.js"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.30.1",

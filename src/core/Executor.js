@@ -72,7 +72,7 @@ class Executor {
     }
 
     this.maxPriorityFeeLamports = config.maxPriorityFeeLamports;
-    this.computeUnitLimit = parseInt(process.env.COMPUTE_UNIT_LIMIT || '300000', 10);
+    this.computeUnitLimit = parseInt(process.env.COMPUTE_UNIT_LIMIT || '150000', 10);
 
     // ============ Priority fee oracle ============
     const PriorityFeeOracle = require('../utils/priorityFeeOracle');
@@ -175,6 +175,61 @@ class Executor {
       skipPreflight: true,
       maxRetries: 0,
     });
+  }
+
+  /**
+   * 等待 tx 落链确认。返回 { confirmed: bool, error?: string, slot?: number }
+   * - confirmed=true 表示链上落链且无 err（等同 SUCCESS）
+   * - confirmed=false 且 error='not_landed' 表示超时未找到 tx（被丢弃）
+   * - confirmed=false 且 error 是错误原因 表示 tx 落链但执行报错
+   *
+   * 用 polling getSignatureStatuses，比 confirmTransaction 更快、更可控。
+   */
+  async confirmTx(signature, { timeoutMs = 12_000, pollIntervalMs = 800 } = {}) {
+    if (!signature || signature.startsWith('DRYRUN')) {
+      return { confirmed: true, slot: null }; // DRY_RUN 自动算成功
+    }
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      try {
+        const { value } = await this.rpc.getSignatureStatuses([signature], {
+          searchTransactionHistory: false,
+        });
+        const status = value?.[0];
+        if (status) {
+          if (status.err) {
+            return {
+              confirmed: false,
+              error: typeof status.err === 'string' ? status.err : JSON.stringify(status.err),
+              slot: status.slot,
+            };
+          }
+          // confirmationStatus: 'processed' | 'confirmed' | 'finalized'
+          if (status.confirmationStatus === 'confirmed' ||
+              status.confirmationStatus === 'finalized' ||
+              status.confirmations !== null) {
+            return { confirmed: true, slot: status.slot };
+          }
+          // status='processed' 还需要再等等
+        }
+      } catch (err) {
+        // 单次查询失败不要紧，继续 poll
+      }
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
+    }
+    return { confirmed: false, error: 'not_landed' };
+  }
+
+  /**
+   * 查询钱包对某 mint 的实际持币（uiAmount）。给 reconciliation 用。
+   */
+  async getWalletTokenBalance(mint) {
+    if (!this.keypair) return 0;
+    try {
+      return await this._getRealOnchainTokenAmount(mint, 6);
+    } catch (_) {
+      return 0;
+    }
   }
 
   /**

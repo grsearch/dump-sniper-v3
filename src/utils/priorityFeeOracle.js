@@ -44,7 +44,7 @@ const CACHE_TTL_MS = 1500;
 class PriorityFeeOracle {
   constructor() {
     this.rpcUrl = config.helius.rpcUrl;
-    this.cuLimit = parseInt(process.env.COMPUTE_UNIT_LIMIT || '300000', 10);
+    this.cuLimit = parseInt(process.env.COMPUTE_UNIT_LIMIT || '150000', 10);
     this._cache = null;        // { levels: {...}, fetchedAt: ts }
     this._inflight = null;     // 防止并发查询
   }

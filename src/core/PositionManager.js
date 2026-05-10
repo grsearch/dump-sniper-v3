@@ -52,6 +52,24 @@ class PositionManager extends EventEmitter {
       this._tick();
     }, 100);
 
+    // v3.3: 重试 reconciler — 每 5 秒扫描 DB 找到期的 pending sell 和 stuck position
+    // 处理重启场景（setTimeout 丢失）+ 长时间错过的重试
+    this.reconcilerTimer = setInterval(() => {
+      this._reconcileRetries().catch((err) => {
+        monitor.recordError('PositionManager', err, { phase: 'reconciler' });
+      });
+    }, 5000);
+
+    // v3.4: 主动池子轮询 — 持仓期间每 500ms 拉一次每个 token 的 pool state 算价格
+    // 修复：原来 PriceTracker 只在外部砸盘交易触发时更新；微盘币 15s 内可能没有任何 swap
+    // → 价格永远是 entryPrice → 永远不止盈也不止损 → 全部 TIMEOUT 出场
+    this.poolPollIntervalMs = parseInt(process.env.POOL_POLL_INTERVAL_MS || '500', 10);
+    this.poolPollTimer = setInterval(() => {
+      this._pollPoolPrices().catch((err) => {
+        monitor.recordError('PositionManager', err, { phase: 'pool_poll' });
+      });
+    }, this.poolPollIntervalMs);
+
     this.priceTracker.on('update', ({ mint, price }) => {
       const pid = this.byMint.get(mint);
       if (!pid) return;
@@ -61,6 +79,8 @@ class PositionManager extends EventEmitter {
 
   stop() {
     clearInterval(this.tickTimer);
+    clearInterval(this.reconcilerTimer);
+    clearInterval(this.poolPollTimer);
   }
 
   hasOpenPosition(mint) {
@@ -102,14 +122,24 @@ class PositionManager extends EventEmitter {
         // 双确认状态
         _tpConfirmCount: 0,
         _tpFirstTriggerTs: null,
+        // v3.3: 重试相关
+        status: row.status || 'open',
+        exitReason: row.exit_intent || row.exit_reason || null,
+        nextRetryAt: row.next_retry_at || null,
+        _lastSellSignature: row.pending_sell_signature || null,
       };
+      // 已经在 sell flow 中：标记 exiting=true 防止重新触发 _exit
+      if (pos.status === 'sell_pending' || pos.status === 'sell_confirming') {
+        pos.exiting = true;
+      }
       this.positions.set(pos.positionId, pos);
       this.byMint.set(pos.mint, pos.positionId);
       restored.push(pos);
+      const statusBadge = pos.status === 'open' ? '' : ` [status=${pos.status}, attempts=${pos.sellAttempts}]`;
       console.log(
         `[PositionManager] 🔄 RESTORED ${pos.symbol || pos.mint.slice(0, 6)} ` +
           `opened ${Math.round((Date.now() - pos.openedAt) / 1000)}s ago, ` +
-          `${(pos.tokenAmount ?? 0).toFixed(2)} tokens`,
+          `${(pos.tokenAmount ?? 0).toFixed(2)} tokens${statusBadge}`,
       );
     }
     monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
@@ -127,8 +157,9 @@ class PositionManager extends EventEmitter {
    * @param {number} p.tokenAmount - 真实买到的 token UI amount
    * @param {boolean} p.dryRun
    * @param {string} p.signature
+   * @param {number} [p.buyFeeLamports] - BUY tx 的 priority fee + base fee (lamports)
    */
-  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature }) {
+  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports }) {
     const pid = positionId || crypto.randomUUID();
     const pos = {
       positionId: pid,
@@ -140,6 +171,8 @@ class PositionManager extends EventEmitter {
       openedAt: Date.now(),
       dryRun: !!dryRun,
       buySignature: signature,
+      buyFeeLamports: buyFeeLamports || 0,  // v3.4: 真实成本
+      sellFeeLamports: 0,                    // 卖出时累加（包括所有重试的 fee）
       exiting: false,
       sellAttempts: 0,
       _tpConfirmCount: 0,
@@ -158,6 +191,7 @@ class PositionManager extends EventEmitter {
       tokenAmount,
       dryRun: !!dryRun,
       buySignature: signature,
+      buyFeeLamports: pos.buyFeeLamports,
     });
 
     console.log(
@@ -270,10 +304,15 @@ class PositionManager extends EventEmitter {
 
     pos.sellAttempts = (pos.sellAttempts || 0) + 1;
 
-    // 计算 PnL 用真实成交结果（不是 trigger 价）
     const realSolOut = sellResult.solOut ?? null;
     const realExitPrice = sellResult.price ?? triggerPrice;
 
+    // v3.4: 累加每次 sell 尝试的 priority fee（含失败的，因为失败也消耗了 fee）
+    if (sellResult.priorityFeeLamports) {
+      pos.sellFeeLamports = (pos.sellFeeLamports || 0) + sellResult.priorityFeeLamports;
+    }
+
+    // 记录 trade 提交事件（成功/失败都记）
     this.tradeLogger.logTrade({
       positionId: pos.positionId,
       ts: Date.now(),
@@ -291,93 +330,327 @@ class PositionManager extends EventEmitter {
       error: sellResult.error,
     });
 
-    if (sellResult.success) {
-      const exitSol = realSolOut ?? pos.tokenAmount * realExitPrice;
-      const pnlSol = exitSol - pos.entrySol;
-      const pnlPct = ((exitSol - pos.entrySol) / pos.entrySol) * 100;
+    // ============ 分支 A：提交本身失败（拿不到 signature） ============
+    if (!sellResult.success) {
+      monitor.inc('PositionManager.sellSubmitFail', 1, 'PositionManager');
+      this.tradeLogger.recordSellAttempt(pos.positionId, sellResult.error);
 
-      this.tradeLogger.closePosition(pos.positionId, {
-        closedAt: Date.now(),
-        exitPrice: realExitPrice,
-        exitSol,
-        pnlSol,
-        pnlPct,
-        exitReason: pos.exitReason,
-        sellSignature: sellResult.signature,
-      });
+      if (pos.dryRun) {
+        monitor.recordError('PositionManager', new Error('DRY_RUN sell unexpectedly failed'), {
+          mint: pos.mint,
+          symbol: pos.symbol,
+          error: sellResult.error,
+        });
+        console.error(
+          `[PositionManager] DRY_RUN sell unexpectedly failed for ${pos.mint}; abandoning`,
+        );
+        this.tradeLogger.closePosition(pos.positionId, {
+          closedAt: Date.now(),
+          exitPrice: triggerPrice,
+          exitSol: 0,
+          pnlSol: -pos.entrySol,
+          pnlPct: -100,
+          exitReason: pos.exitReason + '_FAILED',
+          sellSignature: null,
+        });
+        this.positions.delete(pos.positionId);
+        this.byMint.delete(pos.mint);
+        monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
+        return;
+      }
 
-      this.positions.delete(pos.positionId);
-      this.byMint.delete(pos.mint);
-      monitor.inc('PositionManager.closed', 1, 'PositionManager');
-      monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
-      if (pnlSol > 0) monitor.inc('PositionManager.winners', 1, 'PositionManager');
-      else monitor.inc('PositionManager.losers', 1, 'PositionManager');
-
-      console.log(
-        `[PositionManager] 🏁 CLOSED ${pos.symbol || pos.mint.slice(0, 6)} ` +
-          `realPnl=${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(2)}%)`,
-      );
-
-      this.emit('closed', {
-        ...pos,
-        exitPrice: realExitPrice,
-        exitSol,
-        pnlSol,
-        pnlPct,
-        exitReason: pos.exitReason,
-      });
+      this._scheduleRetryOrStuck(pos, triggerPrice, sellResult.error);
       return;
     }
 
-    // SELL 失败 → 重试
-    monitor.inc('PositionManager.sellRetries', 1, 'PositionManager');
-    this.tradeLogger.recordSellAttempt(pos.positionId, sellResult.error);
+    // ============ 分支 B：提交成功，但还需等链上确认 ============
+    // 此时 ⚠️ 不能立即 closePosition！tx 可能在 mempool 被丢、滑点超限被 reject
+    // 标记 sell_confirming 状态，启动后台确认
+    this.tradeLogger.markSellPending(pos.positionId, sellResult.signature, pos.exitReason);
+    pos._lastSellSignature = sellResult.signature;
 
-    // DRY_RUN 不应该失败
     if (pos.dryRun) {
-      monitor.recordError('PositionManager', new Error('DRY_RUN sell unexpectedly failed'), {
-        mint: pos.mint,
-        symbol: pos.symbol,
-        error: sellResult.error,
-      });
-      console.error(
-        `[PositionManager] DRY_RUN sell unexpectedly failed for ${pos.mint}; abandoning`,
+      // DRY_RUN 直接当成功
+      this._finalizeSuccess(pos, realExitPrice, realSolOut, sellResult.signature);
+      return;
+    }
+
+    // 异步确认（不 await，避免阻塞下一笔操作；失败会自己触发 retry）
+    this._confirmSellAsync(pos, sellResult.signature, realExitPrice, realSolOut, triggerPrice).catch(
+      (err) => {
+        monitor.recordError('PositionManager', err, {
+          phase: 'confirm_async_crash',
+          mint: pos.mint,
+          signature: sellResult.signature,
+        });
+      },
+    );
+  }
+
+  /**
+   * 异步等待 sell tx 落链确认。
+   * 三种结果：
+   *   1. 链上确认无 err  → finalizeSuccess
+   *   2. 链上 tx 报错      → scheduleRetry
+   *   3. 超时未找到 tx    → scheduleRetry（mempool 丢弃）
+   */
+  async _confirmSellAsync(pos, signature, exitPrice, solOut, triggerPrice) {
+    const result = await this.executor.confirmTx(signature, { timeoutMs: 15_000 });
+
+    if (!this.positions.has(pos.positionId)) return; // 期间被其他流程关掉
+
+    if (result.confirmed) {
+      monitor.inc('PositionManager.sellConfirmed', 1, 'PositionManager');
+      this._finalizeSuccess(pos, exitPrice, solOut, signature);
+      return;
+    }
+
+    monitor.inc('PositionManager.sellNotLanded', 1, 'PositionManager');
+    const errMsg = `tx ${signature.slice(0, 8)}.. ${result.error || 'not_landed'}`;
+    console.warn(
+      `[PositionManager] SELL submitted but not confirmed: ${pos.symbol || pos.mint.slice(0, 6)}: ${errMsg}`,
+    );
+    this._scheduleRetryOrStuck(pos, triggerPrice, errMsg);
+  }
+
+  _finalizeSuccess(pos, exitPrice, solOut, signature) {
+    const exitSol = solOut ?? pos.tokenAmount * exitPrice;
+
+    // v3.4: PnL 现在分两个口径：
+    //   grossPnl = exitSol - entrySol（不含 fee；用于策略判断）
+    //   netPnl   = exitSol - entrySol - feeSol（真实利润，含 priority fee）
+    // closePosition 用 netPnl，因为这是用户真正赚到的
+    const grossPnl = exitSol - pos.entrySol;
+    const totalFeeLamports = (pos.buyFeeLamports || 0) + (pos.sellFeeLamports || 0);
+    // 加上 base fee（每笔 5000 lamports × 2 笔 = 10000，约 0.00001 SOL，量小但加上更准）
+    const baseFeeSol = 0.00001;
+    const feeSol = totalFeeLamports / 1e9 + baseFeeSol;
+    const pnlSol = grossPnl - feeSol;
+    const pnlPct = (pnlSol / pos.entrySol) * 100;
+
+    this.tradeLogger.closePosition(pos.positionId, {
+      closedAt: Date.now(),
+      exitPrice,
+      exitSol,
+      pnlSol,
+      pnlPct,
+      exitReason: pos.exitReason,
+      sellSignature: signature,
+    });
+
+    this.positions.delete(pos.positionId);
+    this.byMint.delete(pos.mint);
+    monitor.inc('PositionManager.closed', 1, 'PositionManager');
+    monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
+    if (pnlSol > 0) monitor.inc('PositionManager.winners', 1, 'PositionManager');
+    else monitor.inc('PositionManager.losers', 1, 'PositionManager');
+
+    console.log(
+      `[PositionManager] 🏁 CLOSED ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `gross=${grossPnl.toFixed(4)} fee=${feeSol.toFixed(4)} net=${pnlSol.toFixed(4)} SOL (${pnlPct.toFixed(2)}%)`,
+    );
+
+    this.emit('closed', {
+      ...pos,
+      exitPrice,
+      exitSol,
+      pnlSol,
+      pnlPct,
+      exitReason: pos.exitReason,
+      grossPnlSol: grossPnl,
+      feeSol,
+    });
+  }
+
+  _scheduleRetryOrStuck(pos, triggerPrice, errMsg) {
+    monitor.inc('PositionManager.sellRetries', 1, 'PositionManager');
+
+    // 重试上限：默认 12 次（SELL_RETRY_DELAYS_MS × 2）。超过标 stuck
+    const MAX_RETRIES = SELL_RETRY_DELAYS_MS.length * 2;
+    if (pos.sellAttempts >= MAX_RETRIES) {
+      monitor.inc('PositionManager.sellStuck', 1, 'PositionManager');
+      this.tradeLogger.markStuck(
+        pos.positionId,
+        `gave up after ${pos.sellAttempts} attempts: ${errMsg}`,
       );
-      // 关键：必须 close 该 position，否则 closed_at IS NULL，重启时会被 restoreFromDb 加回来
-      this.tradeLogger.closePosition(pos.positionId, {
-        closedAt: Date.now(),
-        exitPrice: triggerPrice,
-        exitSol: 0,
-        pnlSol: -pos.entrySol,
-        pnlPct: -100,
-        exitReason: pos.exitReason + '_FAILED',
-        sellSignature: null,
-      });
-      this.positions.delete(pos.positionId);
-      this.byMint.delete(pos.mint);
-      monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
+      console.error(
+        `[PositionManager] ⚠️ STUCK ${pos.symbol || pos.mint.slice(0, 6)}: ` +
+          `${pos.sellAttempts} 次重试均失败 — token 留在钱包中，需人工干预`,
+      );
+      // 关键：保持 exiting=true 防止 tick/priceUpdate 再次触发 _exit 进入无限循环
+      // 也不从 this.positions 删除：保留以便 reconciler 监控、dashboard 显示警告
+      pos.exiting = true;
+      pos.status = 'stuck';
       return;
     }
 
     const delayIdx = Math.min(pos.sellAttempts - 1, SELL_RETRY_DELAYS_MS.length - 1);
     const delay = SELL_RETRY_DELAYS_MS[delayIdx] || 30_000;
+    const nextRetryAt = Date.now() + delay;
+
+    // 持久化下次重试时间，重启后 reconciler 会按时唤醒
+    this.tradeLogger.markSellFailedPendingRetry(
+      pos.positionId,
+      nextRetryAt,
+      errMsg,
+      pos.exitReason,
+    );
 
     console.warn(
-      `[PositionManager] SELL failed (attempt ${pos.sellAttempts}): ${sellResult.error}; ` +
-        `retrying in ${delay}ms`,
+      `[PositionManager] SELL retry scheduled: ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `(attempt ${pos.sellAttempts}/${MAX_RETRIES}) in ${delay}ms — ${errMsg}`,
     );
 
     setTimeout(() => {
-      if (!this.positions.has(pos.positionId)) return; // 已被外部关掉
+      if (!this.positions.has(pos.positionId)) return;
       const latestPrice = this.priceTracker.getPrice(pos.mint) || triggerPrice;
       this._attemptSell(pos, latestPrice).catch((err) => {
         monitor.recordError('PositionManager', err, {
           phase: 'sell_retry_crash',
           mint: pos.mint,
         });
-        console.error(`[PositionManager] sell retry crashed: ${err.message}`);
       });
     }, delay);
+  }
+
+  /**
+   * v3.3 重试 reconciler
+   * ====================
+   * 每 5 秒扫一遍 DB，找出所有 status='sell_pending' 且 next_retry_at <= now 的 position
+   * 这覆盖两种场景：
+   *   1. 重启后 setTimeout 丢失 → 找回所有过期的 retry
+   *   2. confirm_async 失败但 setTimeout 也未触发（edge case）
+   *
+   * 同时检查 sell_confirming 状态：如果最后一次提交超过 30s 还在 sell_confirming，
+   * 主动调一次 confirmTx，没确认就触发重试。
+   */
+  /**
+   * v3.4 主动轮询持仓 token 的 pool state，算出当前实时价格。
+   * 修复 TIMEOUT 主导问题：微盘币 15s 内可能没有任何外部 swap → PriceTracker 永远不更新
+   * → 永远不触发止盈止损 → 全部强平。
+   *
+   * 实现：用 Executor 的 onlineSdk 直接拉 pool state，从 reserves 算 mid price。
+   * 频率：每 poolPollIntervalMs (默认 500ms)
+   * 仅持仓期间轮询（持仓为空时不发 RPC）
+   */
+  async _pollPoolPrices() {
+    if (this.positions.size === 0) return;
+    if (this._polling) return; // 防止上一轮还没跑完
+    this._polling = true;
+    try {
+      // 收集所有需要查的 (mint, poolAddress) 组合
+      const queries = [];
+      for (const pos of this.positions.values()) {
+        if (pos.exiting) continue; // 正在卖的不需要再轮询
+        const tokenInfo = this.tokenRegistry.getToken(pos.mint);
+        if (!tokenInfo?.pool_address) continue;
+        queries.push({ mint: pos.mint, poolAddress: tokenInfo.pool_address, decimals: tokenInfo.decimals ?? 6 });
+      }
+      if (queries.length === 0) return;
+
+      // 并行拉，不阻塞
+      await Promise.all(
+        queries.map(async (q) => {
+          try {
+            const price = await this._fetchPoolMidPrice(q.poolAddress, q.decimals);
+            if (price && price > 0) {
+              this.priceTracker.update(q.mint, price, Date.now(), q.poolAddress);
+              monitor.inc('PositionManager.poolPollOk', 1, 'PositionManager');
+            }
+          } catch (err) {
+            monitor.inc('PositionManager.poolPollFail', 1, 'PositionManager');
+          }
+        }),
+      );
+    } finally {
+      this._polling = false;
+    }
+  }
+
+  /**
+   * 从 pool 的 reserves 算 mid price = quoteReserve / baseReserve（按 decimals 调整）
+   * 用 Executor 已加载的 onlineSdk
+   */
+  async _fetchPoolMidPrice(poolAddress, baseDecimals) {
+    if (!this.executor.onlineSdk || !this.executor.keypair) return null;
+    const { PublicKey } = require('@solana/web3.js');
+    const poolKey = new PublicKey(poolAddress);
+    const state = await this.executor.onlineSdk.swapSolanaState(poolKey, this.executor.keypair.publicKey);
+    if (!state || !state.poolBaseAmount || !state.poolQuoteAmount) return null;
+
+    // Number 精度对小价格够用（small floats），不用 BigInt 除
+    const baseRaw = Number(state.poolBaseAmount.toString());
+    const quoteRaw = Number(state.poolQuoteAmount.toString());
+    if (baseRaw <= 0 || quoteRaw <= 0) return null;
+
+    // mid_price = (quote / 1e9) / (base / 10^baseDecimals)
+    //          = quote * 10^baseDecimals / (base * 1e9)
+    const price = (quoteRaw / 1e9) / (baseRaw / Math.pow(10, baseDecimals));
+    return price;
+  }
+
+  async _reconcileRetries() {
+    if (this._reconciling) return; // 防止上一轮还没跑完，新轮就启动
+    this._reconciling = true;
+    try {
+      await this._reconcileRetriesInner();
+    } finally {
+      this._reconciling = false;
+    }
+  }
+
+  async _reconcileRetriesInner() {
+    const now = Date.now();
+    const due = this.tradeLogger.getDuePendingRetries(now);
+
+    for (const row of due) {
+      const pos = this.positions.get(row.position_id);
+      if (!pos) continue; // 已被删除
+
+      // 跳过 stuck 的（不再自动重试，等人工干预）
+      if (row.status === 'stuck' || pos.status === 'stuck') continue;
+
+      // sell_confirming：还在等链上确认；只有 last_retry_at 已经超过 30s 才主动重试
+      if (row.status === 'sell_confirming') {
+        const lastRetry = row.last_retry_at || 0;
+        if (now - lastRetry < 30_000) continue;
+
+        // 已经 30s+ 没动静，主动 confirmTx 一次
+        const sig = row.pending_sell_signature || pos._lastSellSignature;
+        if (sig) {
+          const result = await this.executor.confirmTx(sig, { timeoutMs: 3000, pollIntervalMs: 500 });
+          if (result.confirmed) {
+            monitor.inc('PositionManager.reconcilerConfirmed', 1, 'PositionManager');
+            console.log(
+              `[PositionManager] 🔄 reconciler found landed sell: ${pos.symbol || pos.mint.slice(0, 6)}`,
+            );
+            this._finalizeSuccess(
+              pos,
+              pos.entryPrice, // 拿不到准确成交价，先用 entryPrice 占位
+              null,
+              sig,
+            );
+            continue;
+          }
+        }
+        // 没确认，触发重试
+        monitor.inc('PositionManager.reconcilerRetried', 1, 'PositionManager');
+      }
+
+      // sell_pending（明确等待重试）：直接触发
+      const latestPrice = this.priceTracker.getPrice(pos.mint) || pos.entryPrice;
+      console.log(
+        `[PositionManager] 🔄 reconciler retrying ${pos.symbol || pos.mint.slice(0, 6)} ` +
+          `(status=${row.status}, attempts=${pos.sellAttempts})`,
+      );
+      // 不 await，让多个 retry 并行（但同一 pos 不会并发，因为 status 字段 + lock）
+      this._attemptSell(pos, latestPrice).catch((err) => {
+        monitor.recordError('PositionManager', err, {
+          phase: 'reconciler_retry',
+          mint: pos.mint,
+        });
+      });
+    }
   }
 }
 

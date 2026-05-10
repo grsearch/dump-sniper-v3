@@ -27,7 +27,7 @@ async function main() {
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
   console.log(`Max hold: ${config.strategy.maxHoldMs}ms`);
   console.log(`Executor: Pump AMM SDK direct (no Jupiter)`);
-  console.log(`Compute units: ${process.env.COMPUTE_UNIT_LIMIT || 300000}, max priority fee: ${config.maxPriorityFeeLamports} lamports`);
+  console.log(`Compute units: ${process.env.COMPUTE_UNIT_LIMIT || 150000}, max priority fee: ${config.maxPriorityFeeLamports} lamports`);
   console.log('================================================');
 
   const errors = validateConfig();
@@ -197,6 +197,7 @@ async function main() {
       tokenAmount: buyResult.tokenAmount,  // 真实买到的数量
       dryRun: config.DRY_RUN,
       signature: buyResult.signature,
+      buyFeeLamports: buyResult.priorityFeeLamports || 0,  // v3.4: 用于真实 PnL
     });
 
     // 立即同步 PriceTracker，用真实成交价做 entry baseline

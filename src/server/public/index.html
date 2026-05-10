@@ -231,7 +231,7 @@
 <body>
 
 <div class="header">
-  <h1>🎯 Dump Sniper <span class="v">v3.2</span></h1>
+  <h1>🎯 Dump Sniper <span class="v">v3.4</span></h1>
   <div class="badges">
     <span id="modeBadge" class="badge dry">DRY_RUN</span>
     <span id="wsBadge" class="badge ws disconnected">● WS</span>
@@ -298,6 +298,27 @@
             <thead><tr><th>开仓时间</th><th>Symbol</th><th>CA</th><th>入场价</th><th>当前价</th><th>持有时间</th><th>未实现PnL%</th><th>模式</th></tr></thead>
             <tbody id="openTbody"><tr><td colspan="7" class="empty">无</td></tr></tbody>
           </table>
+        </div>
+        <!-- v3.3: STUCK positions warning -->
+        <div id="stuckBox" style="display:none; margin-top:12px;">
+          <h3 style="font-size:12px;color:#ffb3b0;margin-bottom:6px;">
+            ⚠️ <span id="stuckCount">0</span> 个 STUCK position（卖出失败、token 留在钱包，需人工处理）
+          </h3>
+          <div class="table-wrap" style="max-height:160px;">
+            <table>
+              <thead><tr><th>开仓时间</th><th>Symbol</th><th>CA</th><th>入场SOL</th><th>token 数</th><th>重试次数</th><th>错误</th><th>命令</th></tr></thead>
+              <tbody id="stuckTbody"></tbody>
+            </table>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:6px;">
+            处理方式（在服务器跑）:
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;">npm run stuck</code>
+            列出全部，
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;">npm run stuck retry-all</code>
+            重试全部，
+            <code style="background:rgba(255,255,255,0.05);padding:1px 4px;border-radius:3px;">npm run stuck close &lt;id&gt;</code>
+            认亏关闭单个
+          </div>
         </div>
         <h3 style="font-size:12px;color:var(--text-dim);margin:12px 0 6px;">最近平仓</h3>
         <div class="table-wrap">
@@ -494,6 +515,26 @@ async function refreshPositions() {
       <td><span class="pill ${p.dry_run ? 'dry' : 'live'}">${p.dry_run ? 'DRY' : 'LIVE'}</span></td>
     </tr>`;
   }).join('');
+
+  // v3.3: stuck positions warning panel
+  const stuck = r.stuck || [];
+  const stuckBox = $('stuckBox');
+  if (stuck.length === 0) {
+    stuckBox.style.display = 'none';
+  } else {
+    stuckBox.style.display = 'block';
+    $('stuckCount').textContent = stuck.length;
+    $('stuckTbody').innerHTML = stuck.map(p => `<tr>
+      <td class="mono">${fmtTime(p.opened_at)}</td>
+      <td><b>${escapeHtml(p.symbol || (p.mint || '').slice(0,6))}</b></td>
+      ${caCell(p.mint)}
+      <td class="mono">${(p.entry_sol || 0).toFixed(4)}</td>
+      <td class="mono">${(p.token_amount || 0).toFixed(2)}</td>
+      <td class="mono neg">${p.sell_attempts || 0}</td>
+      <td style="color:var(--text-dim);font-size:11px;max-width:280px;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(p.last_error || '')}">${escapeHtml((p.last_error || '').slice(0, 40))}${(p.last_error || '').length > 40 ? '...' : ''}</td>
+      <td class="mono" style="font-size:10px;">${(p.position_id || '').slice(0, 8)}..</td>
+    </tr>`).join('');
+  }
 }
 
 async function refreshSignals() {

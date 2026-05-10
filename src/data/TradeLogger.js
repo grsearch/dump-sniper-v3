@@ -97,6 +97,33 @@ class TradeLogger {
     if (!cols.includes('last_error')) {
       this.db.exec(`ALTER TABLE positions ADD COLUMN last_error TEXT`);
     }
+    // v3.3: 重试持久化 + 状态机字段
+    if (!cols.includes('next_retry_at')) {
+      this.db.exec(`ALTER TABLE positions ADD COLUMN next_retry_at INTEGER`);
+    }
+    if (!cols.includes('exit_intent')) {
+      // 触发了哪种 exit (TAKE_PROFIT / EMERGENCY_STOP / TIMEOUT)，即使 SELL 还在重试也保留
+      this.db.exec(`ALTER TABLE positions ADD COLUMN exit_intent TEXT`);
+    }
+    if (!cols.includes('status')) {
+      // 状态：'open' / 'sell_pending' / 'sell_confirming' / 'closed' / 'stuck'
+      // 'stuck' 表示重试上限耗尽，需要人工干预
+      this.db.exec(`ALTER TABLE positions ADD COLUMN status TEXT DEFAULT 'open'`);
+    }
+    if (!cols.includes('pending_sell_signature')) {
+      // 已提交但未确认落链的 sell tx
+      this.db.exec(`ALTER TABLE positions ADD COLUMN pending_sell_signature TEXT`);
+    }
+    if (!cols.includes('last_retry_at')) {
+      this.db.exec(`ALTER TABLE positions ADD COLUMN last_retry_at INTEGER`);
+    }
+    // v3.4: 真实 fee 成本（用于 PnL 计算）
+    if (!cols.includes('buy_fee_lamports')) {
+      this.db.exec(`ALTER TABLE positions ADD COLUMN buy_fee_lamports INTEGER DEFAULT 0`);
+    }
+    if (!cols.includes('sell_fee_lamports')) {
+      this.db.exec(`ALTER TABLE positions ADD COLUMN sell_fee_lamports INTEGER DEFAULT 0`);
+    }
   }
 
   _prepareStatements() {
@@ -115,8 +142,8 @@ class TradeLogger {
       insertPosition: this.db.prepare(
         `INSERT INTO positions (position_id, mint, symbol, opened_at,
                                 entry_sol, entry_price, token_amount, dry_run,
-                                buy_signature)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                                buy_signature, buy_fee_lamports)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ),
       closePosition: this.db.prepare(
         `UPDATE positions
@@ -125,8 +152,40 @@ class TradeLogger {
          WHERE position_id = ?`,
       ),
       updatePositionAttempt: this.db.prepare(
-        `UPDATE positions SET sell_attempts = sell_attempts + 1, last_error = ?
+        `UPDATE positions SET sell_attempts = sell_attempts + 1, last_error = ?,
+                              last_retry_at = ?
          WHERE position_id = ?`,
+      ),
+      // v3.3: 标记 sell 已提交，等待链上确认
+      markSellPending: this.db.prepare(
+        `UPDATE positions SET status = 'sell_confirming', pending_sell_signature = ?,
+                              exit_intent = COALESCE(exit_intent, ?)
+         WHERE position_id = ?`,
+      ),
+      // v3.3: sell 链上确认失败，回到 sell_pending 状态等下次重试
+      markSellFailedPendingRetry: this.db.prepare(
+        `UPDATE positions SET status = 'sell_pending', pending_sell_signature = NULL,
+                              next_retry_at = ?, last_error = ?,
+                              exit_intent = COALESCE(exit_intent, ?)
+         WHERE position_id = ?`,
+      ),
+      // v3.3: 标记 stuck（重试上限耗尽）
+      markStuck: this.db.prepare(
+        `UPDATE positions SET status = 'stuck', last_error = ?
+         WHERE position_id = ?`,
+      ),
+      // v3.3: 拉所有需要重试的 position（next_retry_at <= now）
+      getDuePendingRetries: this.db.prepare(
+        `SELECT * FROM positions
+         WHERE closed_at IS NULL
+           AND status IN ('sell_pending', 'sell_confirming')
+           AND (next_retry_at IS NULL OR next_retry_at <= ?)
+         ORDER BY opened_at ASC`,
+      ),
+      // v3.3: 拉所有 stuck 的 position（dashboard 展示用）
+      getStuckPositions: this.db.prepare(
+        `SELECT * FROM positions WHERE status = 'stuck' AND closed_at IS NULL
+         ORDER BY opened_at DESC`,
       ),
       getOpenPositions: this.db.prepare(
         `SELECT * FROM positions WHERE closed_at IS NULL ORDER BY opened_at ASC`,
@@ -192,6 +251,7 @@ class TradeLogger {
       p.tokenAmount ?? null,
       p.dryRun ? 1 : 0,
       p.buySignature || null,
+      p.buyFeeLamports || 0,
     );
   }
 
@@ -209,7 +269,36 @@ class TradeLogger {
   }
 
   recordSellAttempt(positionId, errorMsg) {
-    this.stmts.updatePositionAttempt.run(errorMsg || null, positionId);
+    this.stmts.updatePositionAttempt.run(errorMsg || null, Date.now(), positionId);
+  }
+
+  // v3.3: 标记 sell 已提交、等待链上确认
+  markSellPending(positionId, signature, exitIntent) {
+    this.stmts.markSellPending.run(signature || null, exitIntent || null, positionId);
+  }
+
+  // v3.3: sell 失败，安排下次重试
+  markSellFailedPendingRetry(positionId, nextRetryAt, errorMsg, exitIntent) {
+    this.stmts.markSellFailedPendingRetry.run(
+      nextRetryAt,
+      errorMsg || null,
+      exitIntent || null,
+      positionId,
+    );
+  }
+
+  // v3.3: 标记 stuck（重试耗尽，等人工处理）
+  markStuck(positionId, errorMsg) {
+    this.stmts.markStuck.run(errorMsg || null, positionId);
+  }
+
+  // v3.3: 拉所有需要重试的 position
+  getDuePendingRetries(now = Date.now()) {
+    return this.stmts.getDuePendingRetries.all(now);
+  }
+
+  getStuckPositions() {
+    return this.stmts.getStuckPositions.all();
   }
 
   // 启动恢复用：拉取所有未平仓的持仓
