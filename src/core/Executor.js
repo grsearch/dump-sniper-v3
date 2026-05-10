@@ -74,6 +74,9 @@ class Executor {
     this.maxPriorityFeeLamports = config.maxPriorityFeeLamports;
     this.computeUnitLimit = parseInt(process.env.COMPUTE_UNIT_LIMIT || '150000', 10);
 
+    // v3.5: 通过 setPoolStateCache 由外部注入（避免循环依赖 TokenRegistry）
+    this.poolStateCache = null;
+
     // ============ Priority fee oracle ============
     const PriorityFeeOracle = require('../utils/priorityFeeOracle');
     this.feeOracle = new PriorityFeeOracle();
@@ -128,6 +131,16 @@ class Executor {
       clearInterval(this._blockhashTimer);
       this._blockhashTimer = null;
     }
+    if (this.poolStateCache) {
+      this.poolStateCache.stop();
+    }
+  }
+
+  /**
+   * v3.5: 注入 PoolStateCache，BUY/SELL 路径将优先读缓存
+   */
+  setPoolStateCache(cache) {
+    this.poolStateCache = cache;
   }
 
   /**
@@ -333,9 +346,25 @@ class Executor {
       // SDK 接受 slippage 作为 percent 数（1% 写 1，不是 0.01）
       const slippagePct = config.strategy.buySlippageBps / 100;
 
-      // 1. 拉 pool state
+      // 1. 拉 pool state — v3.5 优先读缓存（PoolStateCache 后台预热）
       const tS0 = Date.now();
-      const swapState = await this.onlineSdk.swapSolanaState(poolKey, this.keypair.publicKey);
+      let swapState = null;
+      let stateSource = 'rpc';
+      if (this.poolStateCache) {
+        swapState = this.poolStateCache.get(order.poolAddress);
+        if (swapState) {
+          stateSource = 'cache';
+          const age = this.poolStateCache.getAge(order.poolAddress);
+          monitor.set('Executor.lastCacheAgeMs', age || 0, 'Executor');
+        }
+      }
+      if (!swapState) {
+        // cache miss：第一次抓取或 cache 失效；走同步 RPC
+        swapState = await this.onlineSdk.swapSolanaState(poolKey, this.keypair.publicKey);
+        monitor.inc('Executor.cacheMiss', 1, 'Executor');
+      } else {
+        monitor.inc('Executor.cacheHit', 1, 'Executor');
+      }
       const stateLatencyMs = Date.now() - tS0;
       monitor.inc('Executor.stateOk', 1, 'Executor');
       monitor.set('Executor.lastStateLatencyMs', stateLatencyMs, 'Executor');
@@ -365,7 +394,7 @@ class Executor {
 
       console.log(
         `[Executor:LIVE] BUY submitted: ${(sig || '').slice(0, 8)}.. ` +
-          `(state=${stateLatencyMs}ms build=${buildLatencyMs}ms send=${sendLatencyMs}ms total=${
+          `(state=${stateLatencyMs}ms[${stateSource}] build=${buildLatencyMs}ms send=${sendLatencyMs}ms total=${
             Date.now() - t0
           }ms, fee=${feeInfo.totalLamports}L ${feeInfo.source})`,
       );

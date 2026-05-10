@@ -48,6 +48,24 @@ async function main() {
   const priceTracker = new PriceTracker();
   const dumpDetector = new DumpDetector(tokenRegistry);
   const executor = new Executor();
+
+  // v3.5: PoolStateCache - 后台预热所有监控代币的 Pump pool state
+  // BUY 路径不再阻塞 swapSolanaState（80-150ms RPC），从内存读 0ms
+  if (!config.DRY_RUN && executor.onlineSdk && executor.keypair) {
+    const PoolStateCache = require('./core/PoolStateCache');
+    const poolStateCache = new PoolStateCache({
+      onlineSdk: executor.onlineSdk,
+      user: executor.keypair.publicKey,
+      getMintList: () => {
+        return tokenRegistry.listActive()
+          .filter((t) => t.pool_address)
+          .map((t) => ({ mint: t.mint, poolAddress: t.pool_address }));
+      },
+    });
+    executor.setPoolStateCache(poolStateCache);
+    poolStateCache.start();
+  }
+
   const positionManager = new PositionManager({
     tradeLogger,
     executor,
