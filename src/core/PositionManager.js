@@ -345,6 +345,23 @@ class PositionManager extends EventEmitter {
         `tokens ${oldTokenAmount.toFixed(2)}→${realTokenReceived.toFixed(2)}, ` +
         `entryPrice ${oldEntryPrice.toExponential(4)}→${pos.entryPrice.toExponential(4)}`,
     );
+
+    // v3.9: 监控真实 CU 消耗，逼近 limit 时告警
+    const cuConsumed = swap.computeUnitsConsumed || 0;
+    const cuLimit = this.executor.computeUnitLimit || 200000;
+    if (cuConsumed > 0) {
+      monitor.set('PositionManager.lastBuyCuConsumed', cuConsumed, 'PositionManager');
+      const cuUtilPct = (cuConsumed / cuLimit) * 100;
+      monitor.set('PositionManager.lastBuyCuUtilPct', Math.round(cuUtilPct), 'PositionManager');
+
+      if (cuUtilPct >= 90) {
+        monitor.inc('PositionManager.cuNearLimit', 1, 'PositionManager');
+        console.warn(
+          `[PositionManager] ⚠️ ${pos.symbol || mint.slice(0, 6)} CU 消耗 ${cuConsumed} / ${cuLimit} ` +
+            `(${cuUtilPct.toFixed(0)}%) — 接近上限，建议调高 COMPUTE_UNIT_LIMIT 或观察是否有 BUY_CHAIN_FAILED`,
+        );
+      }
+    }
   }
 
   _tick() {

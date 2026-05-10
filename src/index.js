@@ -27,7 +27,7 @@ async function main() {
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
   console.log(`Max hold: ${config.strategy.maxHoldMs}ms`);
   console.log(`Executor: Pump AMM SDK direct (no Jupiter)`);
-  console.log(`Compute units: ${process.env.COMPUTE_UNIT_LIMIT || 150000}, max priority fee: ${config.maxPriorityFeeLamports} lamports`);
+  console.log(`Compute units: ${process.env.COMPUTE_UNIT_LIMIT || 200000}, max priority fee: ${config.maxPriorityFeeLamports} lamports`);
   console.log('================================================');
 
   const errors = validateConfig();
@@ -154,7 +154,16 @@ async function main() {
     });
   });
 
-  dumpDetector.on('dumpSignal', (signal) => signalEngine.handleDumpSignal(signal));
+  dumpDetector.on('dumpSignal', (signal) => {
+    // v3.8: 砸盘信号触发瞬间立即异步刷新该 token 的 pool state cache
+    // 这样从 dumpSignal → SignalEngine.handleDumpSignal → emit buyOrder → executor.buy
+    // 这条链路 (~5-20ms) 期间 pool state RPC 已经在并发拉取
+    // 等 Executor.buy 读 cache 时，最坏也是非常新鲜的 state
+    if (executor.poolStateCache && signal.poolAddress) {
+      executor.poolStateCache.refreshOne(signal.poolAddress).catch(() => {});
+    }
+    signalEngine.handleDumpSignal(signal);
+  });
 
   // ============ buyOrder → BUY → register position ============
   signalEngine.on('buyOrder', async (order) => {

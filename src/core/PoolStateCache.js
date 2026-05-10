@@ -105,6 +105,27 @@ class PoolStateCache {
   }
 
   /**
+   * v3.8: 单点刷新（dumpSignal 触发时使用）
+   * 不阻塞调用方；后台异步刷新。如果该 pool 1秒内已经刷过则跳过。
+   */
+  async refreshOne(poolAddress) {
+    if (!this.onlineSdk || !this.user || !poolAddress) return;
+    const cached = this.cache.get(poolAddress);
+    if (cached && Date.now() - cached.fetchedAt < 1000) return; // 太新就跳
+    try {
+      const { PublicKey } = require('@solana/web3.js');
+      const poolKey = new PublicKey(poolAddress);
+      const state = await this.onlineSdk.swapSolanaState(poolKey, this.user);
+      if (state) {
+        this.cache.set(poolAddress, { state, fetchedAt: Date.now() });
+        monitor.inc('PoolStateCache.refreshOneOk', 1, 'PoolStateCache');
+      }
+    } catch (err) {
+      monitor.inc('PoolStateCache.refreshOneFail', 1, 'PoolStateCache');
+    }
+  }
+
+  /**
    * 后台刷新所有 pool 的 state。串行最多 10 个并发避免压垮 RPC。
    */
   async _refreshAll() {

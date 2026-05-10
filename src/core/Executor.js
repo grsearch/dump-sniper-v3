@@ -72,7 +72,7 @@ class Executor {
     }
 
     this.maxPriorityFeeLamports = config.maxPriorityFeeLamports;
-    this.computeUnitLimit = parseInt(process.env.COMPUTE_UNIT_LIMIT || '150000', 10);
+    this.computeUnitLimit = parseInt(process.env.COMPUTE_UNIT_LIMIT || '200000', 10);
 
     // v3.5: 通过 setPoolStateCache 由外部注入（避免循环依赖 TokenRegistry）
     this.poolStateCache = null;
@@ -133,6 +133,9 @@ class Executor {
     }
     if (this.poolStateCache) {
       this.poolStateCache.stop();
+    }
+    if (this.feeOracle && this.feeOracle.stop) {
+      this.feeOracle.stop();
     }
   }
 
@@ -305,6 +308,7 @@ class Executor {
         realSolDelta,
         realTokenDelta,
         fee: tx.meta.fee || 0,
+        computeUnitsConsumed: tx.meta.computeUnitsConsumed || 0,
         success: !tx.meta.err,
       };
     } catch (err) {
@@ -319,8 +323,8 @@ class Executor {
   async _buildAndSignTx(swapInstructions, side) {
     const blockhash = await this._getBlockhash();
 
-    // 通过 oracle 拿到当前最优 priority fee
-    const fee = await this.feeOracle.estimate(side);
+    // v3.8: oracle.estimate 现在是同步调用（内存读，永不阻塞）
+    const fee = this.feeOracle.estimate(side);
     monitor.set(`Executor.last${side}FeeLamports`, fee.totalLamports, 'Executor');
 
     const ixs = [
