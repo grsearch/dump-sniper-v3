@@ -40,6 +40,10 @@ monitor.registerModule('Executor', { staleMs: 24 * 60 * 60_000, label: 'Trade Ex
 class Executor {
   constructor() {
     this.dryRun = config.DRY_RUN;
+    // v3.15 通道分流（Openclaw 发现：staked RPC 限流严格，70 token 刷新会打爆）
+    //   - this.rpc：普通公共 RPC（用于 PoolStateCache 后台刷新 + getTransaction / getSignatureStatuses 等查询）
+    //   - this.stakedRpc：staked 端点，**只用于 sendTransaction**（不参与缓存刷新）
+    //   - this.senderEndpoint：Helius Sender（带 Jito 通道）
     this.rpc = new Connection(config.helius.rpcUrl, 'confirmed');
     this.stakedRpc = config.helius.stakedRpcUrl
       ? new Connection(config.helius.stakedRpcUrl, 'confirmed')
@@ -56,7 +60,8 @@ class Executor {
 
     // SDK 在 LIVE 模式才需要
     this.pumpSdk = null;       // PumpAmmSdk（指令构造）
-    this.onlineSdk = null;     // OnlinePumpAmmSdk（state 拉取）
+    this.onlineSdk = null;     // OnlinePumpAmmSdk（state 拉取） — 走普通 RPC
+    this.cacheSdk = null;      // v3.15 给 PoolStateCache 用，走普通 RPC（与 onlineSdk 实例分开避免共享 socket pool 限流）
     if (!this.dryRun) {
       try {
         const pumpModule = require('@pump-fun/pump-swap-sdk');
@@ -65,8 +70,13 @@ class Executor {
           throw new Error('SDK exports missing PumpAmmSdk / OnlinePumpAmmSdk');
         }
         this.pumpSdk = new PumpAmmSdk();
-        this.onlineSdk = new OnlinePumpAmmSdk(this.stakedRpc);
-        console.log('[Executor] Pump AMM SDK loaded (PumpAmmSdk + OnlinePumpAmmSdk)');
+        // v3.15: onlineSdk 改用 this.rpc（普通节点），不再走 stakedRpc
+        // 原因：stakedRpc（你的 donetta 专属端点）限流严格，70 token 刷新会打爆
+        this.onlineSdk = new OnlinePumpAmmSdk(this.rpc);
+        // v3.15: cacheSdk 独立实例，专给 PoolStateCache 用
+        // 即使 onlineSdk 因 BUY 短时占用也不影响后台刷新
+        this.cacheSdk = new OnlinePumpAmmSdk(this.rpc);
+        console.log('[Executor] Pump AMM SDK loaded (onlineSdk + cacheSdk 都走普通 RPC，stakedRpc 仅用于 sendTx)');
       } catch (err) {
         console.error(`[Executor] failed to load @pump-fun/pump-swap-sdk: ${err.message}`);
       }

@@ -48,14 +48,18 @@ class PoolStateCache {
     this.onlineSdk = onlineSdk;
     this.user = user;
     this.getMintList = getMintList;
+    // refreshIntervalMs = 每个 token 被刷新一次的周期（默认 5s）
     this.refreshIntervalMs = parseInt(
-      process.env.POOL_STATE_REFRESH_MS || refreshIntervalMs || '2000',
+      process.env.POOL_STATE_REFRESH_MS || refreshIntervalMs || '5000',
       10,
     );
+    // tick 间隔（默认 200ms），实际 RPC 调用频率 = batchSize / tickInterval
+    this._tickIntervalMs = parseInt(process.env.POOL_STATE_TICK_MS || '200', 10);
 
     this.cache = new Map();   // poolAddress(string) → { state, fetchedAt }
     this.timer = null;
     this._refreshing = false;
+    this._refreshCursor = 0;  // v3.14: 滚动刷新游标
   }
 
   start() {
@@ -64,17 +68,16 @@ class PoolStateCache {
       console.warn('[PoolStateCache] not started: missing onlineSdk or user');
       return;
     }
-    // 立即刷一次
-    this._refreshAll().catch((err) => {
-      monitor.recordError('PoolStateCache', err, { phase: 'initial_refresh' });
-    });
-    // 然后定时
+    // v3.14: 滚动刷新 — 每 _tickIntervalMs 跑一次小批量
+    // 不再"5 秒一次大爆发"，改"每 200ms 刷几个 token"，RPS 平稳
     this.timer = setInterval(() => {
       this._refreshAll().catch((err) => {
         monitor.recordError('PoolStateCache', err, { phase: 'periodic_refresh' });
       });
-    }, this.refreshIntervalMs);
-    console.log(`[PoolStateCache] started (refresh every ${this.refreshIntervalMs}ms)`);
+    }, this._tickIntervalMs);
+    console.log(
+      `[PoolStateCache] started (rolling refresh: each token every ${this.refreshIntervalMs}ms, tick=${this._tickIntervalMs}ms)`,
+    );
   }
 
   stop() {
@@ -126,7 +129,19 @@ class PoolStateCache {
   }
 
   /**
-   * 后台刷新所有 pool 的 state。串行最多 10 个并发避免压垮 RPC。
+   * v3.14 重写：滚动式刷新（rolling refresh），不再"每 N 秒一次大批量"
+   *
+   * 原版（v3.5-v3.13）：每 5s 醒来 → 8 并发刷 70 个 token → 瞬时 RPS 暴涨被限流
+   * 现在：维护一个游标，每 tickIntervalMs 刷一小批（refreshBatchSize）
+   *     -> 平均 RPS = batchSize × (1000/tickInterval) / token 数 × token 数 = 平稳值
+   *
+   * 计算示例（70 个 token，目标每个 token 每 5s 刷一次 = 14 RPS PoolStateCache 占用）：
+   *   - tickIntervalMs = 200ms  -> 每秒 5 tick
+   *   - 每 tick 刷 (70 × 200) / 5000 = 2.8 ≈ 3 个 token
+   *   - 实际 = 3 × 5 = 15 RPS 平稳，无爆发
+   *
+   * 注意：swapSolanaState 内部可能拉 4 个账户（pool, globalConfig, base vault, quote vault）
+   * 但 SDK 通常用 getMultipleAccounts 合并成 1 个 RPC call。如果不是 → RPS × 4
    */
   async _refreshAll() {
     if (this._refreshing) return;
@@ -136,33 +151,41 @@ class PoolStateCache {
       const targets = list.filter((t) => t.poolAddress);
       if (targets.length === 0) return;
 
-      monitor.beat('PoolStateCache', `refresh:${targets.length}`);
+      // 计算每个 tick 应该刷新的数量
+      // 目标：每个 token 在 refreshIntervalMs 周期内被刷一次
+      const tokensPerCycle = targets.length;
+      const ticksPerCycle = this.refreshIntervalMs / this._tickIntervalMs;
+      const batchSize = Math.max(1, Math.ceil(tokensPerCycle / ticksPerCycle));
+
+      // 从 _refreshCursor 开始，刷 batchSize 个
+      const slice = [];
+      for (let i = 0; i < batchSize; i++) {
+        slice.push(targets[this._refreshCursor % targets.length]);
+        this._refreshCursor++;
+      }
+
+      monitor.beat('PoolStateCache', `refresh:${slice.length}`);
       const t0 = Date.now();
 
-      // 并发 8 个：47 个代币约 6 批，每批 50ms RPC = 300ms 总耗时
-      const CONCURRENCY = 8;
       let okCount = 0;
       let failCount = 0;
-      for (let i = 0; i < targets.length; i += CONCURRENCY) {
-        const batch = targets.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(
-          batch.map(async (t) => {
-            try {
-              const poolKey = new PublicKey(t.poolAddress);
-              const state = await this.onlineSdk.swapSolanaState(poolKey, this.user);
-              if (state) {
-                this.cache.set(t.poolAddress, { state, fetchedAt: Date.now() });
-                return true;
-              }
-              return false;
-            } catch (err) {
-              return false;
-            }
-          }),
-        );
-        for (const r of results) {
-          if (r) okCount++;
-          else failCount++;
+      // 顺序刷新（不要并发，避免瞬时峰值）
+      for (const t of slice) {
+        try {
+          const poolKey = new PublicKey(t.poolAddress);
+          const state = await this.onlineSdk.swapSolanaState(poolKey, this.user);
+          if (state) {
+            this.cache.set(t.poolAddress, { state, fetchedAt: Date.now() });
+            okCount++;
+          } else {
+            failCount++;
+          }
+        } catch (err) {
+          failCount++;
+          // 429 时短暂退避
+          if (err.message && err.message.includes('429')) {
+            await new Promise((r) => setTimeout(r, 200));
+          }
         }
       }
 
