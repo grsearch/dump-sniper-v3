@@ -25,6 +25,7 @@ const {
   VersionedTransaction,
   TransactionMessage,
   ComputeBudgetProgram,
+  SystemProgram,
 } = require('@solana/web3.js');
 const bs58Lib = require('bs58');
 const bs58 = bs58Lib.default || bs58Lib;
@@ -76,6 +77,22 @@ class Executor {
 
     // v3.5: 通过 setPoolStateCache 由外部注入（避免循环依赖 TokenRegistry）
     this.poolStateCache = null;
+
+    // v3.13: Jito tip — Helius Sender 路径需要 ≥ 0.001 SOL tip 才能走 Jito 通道
+    // 不配置 → tx 只走 staked validator 通道（错过 Jito MEV 通道）
+    // 配置 0.001+ SOL → 双通道（staked + Jito auction），同 slot 命中率提升
+    // 8 个 Jito tip 账户，每笔 BUY 随机选一个（避免账户写锁竞争）
+    this.jitoTipLamports = parseInt(process.env.JITO_TIP_LAMPORTS || '0', 10);
+    this.jitoTipAccounts = [
+      '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+      'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
+      'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+      'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
+      'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
+      'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
+      'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
+      '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
+    ];
 
     // ============ Priority fee oracle ============
     const PriorityFeeOracle = require('../utils/priorityFeeOracle');
@@ -319,6 +336,7 @@ class Executor {
 
   /**
    * 构造、签名 tx。Side ('BUY' or 'SELL') 决定使用哪个 priority fee 等级。
+   * v3.13: BUY 自动注入 Jito tip 指令（如果配置了 JITO_TIP_LAMPORTS）
    */
   async _buildAndSignTx(swapInstructions, side) {
     const blockhash = await this._getBlockhash();
@@ -332,6 +350,20 @@ class Executor {
     ];
     if (fee.microLamportsPerCu > 0) {
       ixs.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: fee.microLamportsPerCu }));
+    }
+
+    // v3.13: BUY 注入 Jito tip（仅当走 Sender + 配置了 tip）
+    // 走 Jito 拍卖通道，跟 3fZftz6m 这类用 bundle 的对手在同一战场竞争
+    if (side === 'BUY' && this.senderEndpoint && this.jitoTipLamports > 0) {
+      const tipAccount = this.jitoTipAccounts[Math.floor(Math.random() * this.jitoTipAccounts.length)];
+      ixs.push(
+        SystemProgram.transfer({
+          fromPubkey: this.keypair.publicKey,
+          toPubkey: new PublicKey(tipAccount),
+          lamports: this.jitoTipLamports,
+        }),
+      );
+      monitor.inc('Executor.jitoTipsSent', 1, 'Executor');
     }
 
     for (const ix of swapInstructions) ixs.push(ix);
