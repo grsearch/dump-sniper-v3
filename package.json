@@ -11,6 +11,7 @@
     "fill-pools": "node scripts/fill-pools.js",
     "latency": "node scripts/latency-analyze.js",
     "dissect": "node scripts/latency-dissect.js",
+    "strategy": "node scripts/strategy-analyze.js",
     "stuck": "node scripts/stuck.js"
   },
   "dependencies": {
