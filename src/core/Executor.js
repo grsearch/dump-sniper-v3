@@ -93,15 +93,22 @@ class Executor {
     // 配置 0.001+ SOL → 双通道（staked + Jito auction），同 slot 命中率提升
     // 8 个 Jito tip 账户，每笔 BUY 随机选一个（避免账户写锁竞争）
     this.jitoTipLamports = parseInt(process.env.JITO_TIP_LAMPORTS || '0', 10);
+    // v3.16: Helius Sender 官方 tip 账户列表（10 个）
+    // ⚠️ 之前用的 Jito 官方 8 个账户是错的 — Helius Sender 拒绝它们
+    // 来源: https://www.helius.dev/docs/sending-transactions/sender (2026)
+    // 错误信息: "transaction must send a tip of at least 200000 lamports to one of
+    //          the following Helius wallets"
     this.jitoTipAccounts = [
-      '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
-      'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
-      'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
-      'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
-      'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
-      'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
-      'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
-      '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
+      '4ACfpUFoaSD9bfPdeu6DBt89gB6ENTeHBXCAi87NhDEE',
+      'D2L6yPZ2FmmmTKPgzaMKdhu6EWZcTpLy1Vhx8uvZe7NZ',
+      '9bnz4RShgq1hAnLnZbP8kbgBg1kEmcJBYQq3gQbmnSta',
+      '5VY91ws6B2hMmBFRsXkoAAdsPHBJwRfBht4DXox3xkwn',
+      '2nyhqdwKcJZR2vcqCyrYsaPVdAnFoJjiksCXJ7hfEYgD',
+      '2q5pghRs6arqVjRvT5gfgWfWcHWmw1ZuCzphgd5KfWGJ',
+      'wyvPkWjVZz1M8fHQnMMCDTQDbkManefNNhweYk5WkcF',
+      '3KCKozbAaF75qEU33jtzozcJ29yJuaLJTy2jFdzUY8bT',
+      '4vieeGHPYPG2MmyPRcYjdiDmmhN3ww7hsFNap8pVN3Ey',
+      '4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or',
     ];
 
     // ============ Priority fee oracle ============
@@ -192,9 +199,18 @@ class Executor {
 
   /**
    * 用 Helius Sender (推荐 fra-sender.helius-rpc.com/fast 同区域) 或 staked RPC 提交交易。
+   *
+   * v3.16: 新增 side 参数
+   *   - BUY 走 Sender（tx 带 Jito tip，能进 Jito 拍卖通道）
+   *   - SELL 走 staked RPC（tx 不带 Jito tip，Sender 会拒收 → 浪费 500-700ms fallback）
+   *
+   * @param {Buffer} serialized
+   * @param {'BUY'|'SELL'} side
    */
-  async _submitTx(serialized) {
-    if (this.senderEndpoint) {
+  async _submitTx(serialized, side) {
+    // 只有 BUY 才尝试 Sender（要带 Jito tip）
+    // SELL 直接走 staked RPC（SELL 不抢 slot，省 500-700ms fallback 浪费）
+    if (this.senderEndpoint && side === 'BUY' && this.jitoTipLamports > 0) {
       try {
         const axios = require('axios');
         const body = {
@@ -502,7 +518,7 @@ class Executor {
       const { serialized, feeInfo } = await this._buildAndSignTx(swapIxs, 'BUY');
 
       const tSend0 = Date.now();
-      const sig = await this._submitTx(serialized);
+      const sig = await this._submitTx(serialized, 'BUY');
       const sendLatencyMs = Date.now() - tSend0;
       monitor.inc('Executor.buySuccess', 1, 'Executor');
 
@@ -648,7 +664,7 @@ class Executor {
       const { serialized, feeInfo } = await this._buildAndSignTx(swapIxs, 'SELL');
 
       const tSend0 = Date.now();
-      const sig = await this._submitTx(serialized);
+      const sig = await this._submitTx(serialized, 'SELL');
       const sendLatencyMs = Date.now() - tSend0;
       monitor.inc('Executor.sellSuccess', 1, 'Executor');
 
